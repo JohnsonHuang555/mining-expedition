@@ -22,8 +22,8 @@
 | 6b | Hot Reload：Edge Runtime 重新載入 `packages/` | `verify:hot-reload` 第 2 項（`policy = "oneshot"`） | ✅ | ✅ | ⏳ |
 | 6c | Hot Reload：從宿主（Windows）存檔 | 在 Windows 端覆寫 `dev-marker.ts`，輪詢 web 與 Edge | — | ✅ web 1.35 s / edge 1.54 s | ⏳ |
 | 7 | 正式環境健康檢查不洩漏內部資訊 | `verify:env` 的「Web /api/health 只回傳 ok」；production 模式下診斷端點 404 | ✅ | ✅ | — |
-| 8a | 本地 Supabase / web 只綁定 loopback | `verify:env` 的「埠只綁定 loopback」（`docker inspect` 的 HostIp 必須是 `127.0.0.1` / `::1`） | 待 CI | ✅ | ⏳ |
-| 8b | 非 loopback 介面實際連不到 | `verify:env` 的「非 loopback 介面連不到已發布的埠」（dev 容器在 host network，對每個非 loopback IPv4 × 每個已發布埠連線，必須被拒） | 待 CI | ✅（Docker Desktop VM 介面） | ⏳ |
+| 8a | 本地 Supabase / web 只綁定 loopback | `verify:env` 的「埠只綁定 loopback」（`docker inspect` 的 HostIp 必須是 `127.0.0.1` / `::1`） | ✅ | ✅ | ⏳ |
+| 8b | 非 loopback 介面實際連不到 | `verify:env` 的「非 loopback 介面連不到已發布的埠」（dev 容器在 host network，對每個非 loopback IPv4 × 每個已發布埠連線，必須被拒） | ✅（runner 的 10.1.0.4 與 Docker bridge） | ✅（Docker Desktop VM 介面） | ⏳ |
 | 8c | 宿主作業系統的區網位址連不到 | 手動：見下方「區網存取的手動確認」 | — | ✅ | ⏳ |
 
 CI 的完整紀錄：PR #2 的 Checks → `docker integration (Linux)`，其中 `diagnose` 步驟的輸出包含工具版本、socket 權限、容器、網路、Edge Runtime 掛載與日誌。
