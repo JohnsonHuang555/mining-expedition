@@ -37,3 +37,12 @@ export const FIRST_TREASURE_PROTECTED_ARTIFACT: ArtifactId = "a_z1_lantern";
 /** 離線（D9、P28）。結算流程在 Settlement 階段實作 */
 export const OFFLINE_CAP_MS = 12 * 60 * 60 * 1000;
 export const ONLINE_GAP_MS = 300_000;
+
+/**
+ * 寶物市場倍率的範圍（GBS §13，ppm）。每日價格由伺服器排程產生（不在引擎內），
+ * 引擎在出售時驗證傳入的倍率落在範圍內，避免使用錯誤的價格。
+ */
+export const MARKET_MULTIPLIER_RANGE_PPM = {
+  epic: { min: 800_000, max: 1_300_000 },
+  legendary: { min: 700_000, max: 1_500_000 },
+} as const;
