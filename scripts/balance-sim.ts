@@ -16,7 +16,7 @@
  *   --runs 1000              Monte Carlo 次數（玩家類型）
  *   --prot-runs 4000         首次保護比較的次數（P99 需要較多樣本）
  *   --seed 1                 第 i 次模擬的種子 = seed × 100003 + i（各方案共用同一組種子）
- *   --protect none|2|4       D17 首次保護觸發的有效挖掘小時；none = 方案 A
+ *   --protect 4              D17 / D18 首次保護觸發的有效挖掘小時（預設 4）；none = 方案 A
  *   --revisit-coin-mult 0.5  D12
  *   --revisit-treasure-mult 0.5  D14（MVP 暫定）
  *   --rework-coin-mult 0.5   D16 重挖的金幣倍率（暫定，與回訪相同）
@@ -208,7 +208,7 @@ interface Config {
 
 function parseArgs(argv: string[]): Config {
   const get = (k: string, d: string) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : d; };
-  const prot = get("--protect", "none");
+  const prot = get("--protect", "4"); // D18：預設 4 小時
   return {
     runs: Number(get("--runs", "1000")),
     protRuns: Number(get("--prot-runs", "4000")),
