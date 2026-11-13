@@ -52,7 +52,6 @@ mining-expedition/
 ```bash
 cp .env.example .env                                   # 1. compose 設定（通常不需修改）
 docker compose build                                   # 2. 建立開發容器映像
-docker network create supabase_network_mining-expedition   # 2a. 預先建立 Supabase 網路（已存在時會報錯，可忽略）
 docker compose run --rm dev pnpm install               # 3. 安裝套件
 docker compose run --rm dev pnpm supabase:start        # 4. 啟動 Supabase Local（第一次會下載映像，需要幾分鐘）
 docker compose run --rm dev pnpm env:sync              # 5. 產生 apps/web/.env.local
@@ -61,10 +60,18 @@ docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Fu
 docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 ```
 
-全部成功時，第 7 步顯示五個 ✅、第 8 步顯示兩個 ✅。驗收項目與目前狀態見 [`docs/PHASE1_ACCEPTANCE.md`](docs/PHASE1_ACCEPTANCE.md)。
+全部成功時，第 7 步顯示七個 ✅（含「埠只綁定 loopback」與「非 loopback 介面連不到」）、第 8 步顯示兩個 ✅。驗收項目與目前狀態見 [`docs/PHASE1_ACCEPTANCE.md`](docs/PHASE1_ACCEPTANCE.md)。
 
 > `web` 會加入 Supabase 的 Docker 網路，所以一定要先啟動 Supabase（第 4 步）再啟動 web（第 6 步）。
-> 第 2a 步是因為部分 Docker Compose 版本（例如 2.23）執行 `docker compose run dev` 時也會檢查 compose.yaml 中所有外部網路是否存在；`supabase start` 會沿用已存在的網路。
+> Supabase 的網路 `supabase_network_mining-expedition` 由 compose 建立（第一次 `docker compose run` 時），並設定發布的埠只綁定 `127.0.0.1`；`supabase start` 會沿用這個網路。`supabase start` 結尾的 `All services bind to 0.0.0.0` 是 CLI 固定的提示文字，實際綁定以 `verify:env` 為準。
+>
+> **從舊版設定升級**（網路由 `supabase start` 或手動 `docker network create` 建立過）：compose 會出現 `network ... was found but has incorrect label`。執行一次：
+> ```bash
+> docker rm -f $(docker ps -aq --filter label=com.supabase.cli.project=mining-expedition)   # 移除 Supabase 容器（資料 volume 保留）
+> docker compose rm -sf web
+> docker network rm supabase_network_mining-expedition
+> ```
+> 再從第 4 步重新啟動。
 
 #### Windows（PowerShell）
 
@@ -142,7 +149,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | Analytics 關閉 | `supabase/config.toml` 設 `[analytics] enabled = false`：Vector 會從宿主掛載 `DOCKER_HOST` 指向的 socket，而 Docker Desktop 上那是只存在於開發容器內的代理 socket，Vector 會失敗。代價是 Studio 的 Logs 頁面沒有資料；函式日誌用 `docker logs supabase_edge_runtime_mining-expedition` |
 | 相同路徑掛載 | Repo 以宿主上的絕對路徑掛載到容器內。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
 | 網路 | `dev`、`functions` 使用 host network，讓 Supabase CLI 以 `127.0.0.1` 連到它啟動的服務；`web` 加入 Supabase 的 Docker 網路，直接連 API gateway 容器 |
-| 對外埠 | `web` 只綁定 `127.0.0.1:3000`。**Supabase CLI 發布的埠綁定 `0.0.0.0`**，同一網路的裝置可以連到本地 Supabase；在不信任的網路請啟用防火牆，或不用時 `supabase:stop` |
+| 對外埠 | 全部只綁定 `127.0.0.1`，區網連不到。`web` 由 compose 指定 `127.0.0.1:3000`；Supabase CLI 發布埠時不指定 IP（Docker 預設 `0.0.0.0`），因此 compose 建立的 Supabase 網路設定 `com.docker.network.bridge.host_binding_ipv4=127.0.0.1`，讓未指定 IP 的埠改綁 loopback。`verify:env` 以 `docker inspect` 檢查綁定，並從宿主的每個非 loopback IPv4 實際連線確認被拒 |
 | 與正式部署的關係 | `Dockerfile.dev`、`compose.yaml`、`docker/` 只用於本地；Vercel 與 Supabase Cloud 都不會讀取 |
 
 ### 健康檢查與診斷
@@ -164,7 +171,9 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | `supabase start` 出現 `permission denied ... docker.sock` | `docker compose run --rm dev docker info` 確認容器能存取 Docker；回報輸出 |
 | `supabase start` 等待健康檢查逾時 | 確認 Docker Desktop 支援 host network（Settings → Resources → Network → Enable host networking），或回報日誌 |
 | `web` 連不到 Supabase | 重新執行 `dev pnpm env:sync`，再 `docker compose restart web` |
-| `docker compose up -d web` 或 `docker compose run dev ...` 出現 `network supabase_network_mining-expedition declared as external, but could not be found` | `docker network create supabase_network_mining-expedition`（第 2a 步） |
+| `network supabase_network_mining-expedition was found but has incorrect label` | 網路不是由 compose 建立：見上方「從舊版設定升級」 |
+| `verify:env` 的「埠只綁定 loopback」或「非 loopback 介面連不到」失敗 | 同上，網路缺少 `host_binding_ipv4` 選項；`docker network inspect supabase_network_mining-expedition --format '{{json .Options}}'` 確認 |
+| `docker compose down` 出現 `network ... has active endpoints` | Supabase 仍在執行：先 `dev pnpm supabase:stop` 再 `docker compose down` |
 | 容器啟動時出現 `/usr/bin/env: 'bash\r': No such file or directory` | 檔案以 CRLF 檢出（Windows）：見「Windows（PowerShell）」第 1 點 |
 | `supabase start` 出現 `supabase_vector_... container is not ready: unhealthy` | 確認 `supabase/config.toml` 的 `[analytics] enabled = false` 沒有被改掉 |
 | 任何驗證失敗 | 執行 `dev pnpm diagnose`，把輸出與 `verify:env` / `verify:hot-reload` 的結果一起回報 |

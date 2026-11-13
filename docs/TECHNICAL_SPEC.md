@@ -758,7 +758,7 @@ flowchart LR
 |---|---|
 | Docker socket 等同宿主的 root 權限 | 只掛載到需要的服務（`dev`、`functions`）；`web` 不掛載；不在容器內執行來源不明的程式碼 |
 | 容器內以 root 執行 | 入口腳本偵測 socket 的群組 ID，把 `node` 使用者加入該群組後以 `node` 執行 |
-| 埠暴露到區網 | compose 發布的 `web` 埠綁定 `127.0.0.1`。**Supabase CLI 發布的埠綁定 `0.0.0.0`**（CI 實測），區網可連到本地 Supabase：在不信任的網路請啟用防火牆或停止 Supabase |
+| 埠暴露到區網 | 全部只綁定 `127.0.0.1`。`web` 由 compose 指定；Supabase CLI 發布埠時不指定 IP（預設 `0.0.0.0`），因此 Supabase 網路由 compose 建立並設定 `com.docker.network.bridge.host_binding_ipv4=127.0.0.1`，CLI 沿用此網路。`pnpm verify:env` 檢查綁定位址並從非 loopback 介面實際連線驗證 |
 | 本地金鑰 | Supabase 本地金鑰只用於開發；`.env`、`.env.local` 列在 `.gitignore`；正式金鑰只存在 Vercel / Supabase secrets |
 | 版本漂移 | Supabase CLI、pnpm、Docker CLI 版本固定在 `Dockerfile.dev` 的 build args |
 

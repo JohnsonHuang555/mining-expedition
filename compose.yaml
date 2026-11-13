@@ -7,8 +7,9 @@
 #   交給宿主的 Docker 做 bind mount，路徑一致才能正確掛載 migrations 與 functions。
 # - 只有 dev 與 functions 掛載 Docker socket；web 不掛載。
 # - dev 與 functions 使用 host network，讓 Supabase CLI 以 127.0.0.1 連到它啟動的服務。
-# - web 加入 Supabase CLI 建立的網路（supabase_network_<project_id>），直接連 API gateway 容器，
+# - web 加入 Supabase 的網路（supabase_network_<project_id>），直接連 API gateway 容器，
 #   不依賴宿主埠的綁定位址。因此要先 `supabase start` 再啟動 web。
+# - Supabase 的網路由本檔案建立並設定只綁 127.0.0.1（見最下方 networks），本地 Supabase 不對區網開放。
 
 name: mining-expedition
 
@@ -70,6 +71,10 @@ volumes:
 
 networks:
   supabase:
-    # 由 `supabase start` 建立；名稱 = supabase_network_<supabase/config.toml 的 project_id>
+    # 由 compose 建立（任何 `docker compose run/up` 都會先建立），`supabase start` 會沿用同名網路
+    # 而不自己建立。名稱 = supabase_network_<supabase/config.toml 的 project_id>
     name: supabase_network_mining-expedition
-    external: true
+    driver_opts:
+      # 這個網路上的容器發布埠時，未指定 IP 就綁定 127.0.0.1（Supabase CLI 不指定 → 預設 0.0.0.0，區網可連）。
+      # pnpm verify:env 的「埠只綁定 loopback」項目會檢查這一點。
+      com.docker.network.bridge.host_binding_ipv4: "127.0.0.1"

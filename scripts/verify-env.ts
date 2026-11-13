@@ -8,11 +8,16 @@
  * 2. PostgREST → Postgres
  * 3. Web /api/dev/diagnostics：Web → Edge Function / PostgREST（真實 Supabase Local）
  * 4. Web /api/health：正式環境格式只回傳 {"ok": true}
+ * 5. 埠只綁定 loopback：Supabase 與 web 容器發布的埠都是 127.0.0.1 / ::1（docker inspect）
+ * 6. 非 loopback 介面連不到：對宿主（dev 容器在 host network）每個非 loopback IPv4 實際連線，必須失敗
  *
- * 任一項失敗時以非 0 結束。結果不代表 Docker Desktop 以外的環境。
+ * 任一項失敗時以非 0 結束。
  */
 
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { connect } from "node:net";
+import { networkInterfaces } from "node:os";
 import { resolve } from "node:path";
 
 function loadEnvFile(path: string): Record<string, string> {
@@ -50,6 +55,41 @@ async function getJson(url: string, init: RequestInit = {}): Promise<any> {
 }
 
 const headers = { apikey: anonKey, Authorization: `Bearer ${anonKey}` };
+
+const projectId =
+  /^project_id\s*=\s*"([^"]+)"/m.exec(readFileSync(resolve(import.meta.dirname, "../supabase/config.toml"), "utf8"))?.[1] ?? "";
+
+type Binding = { container: string; hostIp: string; hostPort: number };
+
+/** Supabase（CLI 標籤）與 web（compose 標籤）容器發布到宿主的埠 */
+function publishedBindings(): Binding[] {
+  const docker = (args: string[]) => execFileSync("docker", args, { encoding: "utf8", timeout: 30_000 }).trim();
+  const ids = [
+    ...docker(["ps", "-q", "--filter", `label=com.supabase.cli.project=${projectId}`]).split("\n"),
+    ...docker(["ps", "-q", "--filter", "label=com.docker.compose.project=mining-expedition", "--filter", "label=com.docker.compose.service=web"]).split("\n"),
+  ].filter(Boolean);
+  if (ids.length === 0) throw new Error("找不到 Supabase / web 容器");
+  const containers: any[] = JSON.parse(docker(["inspect", ...ids]));
+  return containers.flatMap((c) =>
+    Object.values<any[] | null>(c.NetworkSettings?.Ports ?? {}).flatMap((list) =>
+      (list ?? []).map((b) => ({ container: String(c.Name).replace(/^\//, ""), hostIp: b.HostIp, hostPort: Number(b.HostPort) })),
+    ),
+  );
+}
+
+function tcpReachable(host: string, port: number): Promise<boolean> {
+  return new Promise((done) => {
+    const socket = connect({ host, port, timeout: 1500 });
+    socket.once("connect", () => (socket.destroy(), done(true)));
+    socket.once("timeout", () => (socket.destroy(), done(false)));
+    socket.once("error", () => done(false));
+  });
+}
+
+const LOOPBACK = new Set(["127.0.0.1", "::1"]);
+const NETWORK_HINT =
+  "Supabase 網路不是由 compose.yaml 建立（缺少 host_binding_ipv4 選項）。重建：`pnpm supabase:stop`、`docker compose rm -sf web`、" +
+  "`docker network rm supabase_network_mining-expedition`，再依 README 重新啟動";
 
 const checks: { name: string; run: () => Promise<string> }[] = [
   {
@@ -96,6 +136,33 @@ const checks: { name: string; run: () => Promise<string> }[] = [
       const keys = Object.keys(body);
       if (body.ok !== true || keys.length !== 1) throw new Error(`非預期回應：${JSON.stringify(body)}`);
       return JSON.stringify(body);
+    },
+  },
+  {
+    name: "埠只綁定 loopback（Supabase / web）",
+    run: async () => {
+      const bindings = publishedBindings();
+      const exposed = bindings.filter((b) => !LOOPBACK.has(b.hostIp));
+      if (exposed.length) {
+        throw new Error(`${exposed.map((b) => `${b.container} ${b.hostIp || "0.0.0.0"}:${b.hostPort}`).join(", ")}。${NETWORK_HINT}`);
+      }
+      return [...new Set(bindings.map((b) => `${b.hostIp}:${b.hostPort}`))].sort().join(", ");
+    },
+  },
+  {
+    name: "非 loopback 介面連不到已發布的埠",
+    run: async () => {
+      // dev 容器在 host network：這裡的介面就是宿主（Docker Desktop 則是其 VM）的介面
+      const addrs = Object.values(networkInterfaces())
+        .flat()
+        .filter((i) => i && i.family === "IPv4" && !i.internal)
+        .map((i) => i!.address);
+      if (addrs.length === 0) throw new Error("找不到非 loopback 的 IPv4 介面，無法驗證");
+      const ports = [...new Set(publishedBindings().map((b) => b.hostPort))].sort((a, b) => a - b);
+      const reachable: string[] = [];
+      for (const host of addrs) for (const port of ports) if (await tcpReachable(host, port)) reachable.push(`${host}:${port}`);
+      if (reachable.length) throw new Error(`可從非 loopback 位址連線：${reachable.join(", ")}。${NETWORK_HINT}`);
+      return `${addrs.join(", ")} × 埠 ${ports.join(", ")} 全部拒絕連線`;
     },
   },
 ];
