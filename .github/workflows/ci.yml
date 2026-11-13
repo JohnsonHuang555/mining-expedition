@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 基本檢查：與 Vercel 相同，直接在 Node 22 + pnpm 上執行（不使用 Docker）
+  checks:
+    name: install / typecheck / test / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # 版本取自 package.json 的 packageManager
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  # Edge Function 以 Deno 型別檢查（含匯入 supabase/ 以外的 packages/）
+  edge-function:
+    name: deno check (Edge Functions)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno check --config supabase/functions/health/deno.json supabase/functions/health/index.ts
+
+  # Docker-first 整合驗收：依 README 的步驟，在 Linux runner 上以開發容器啟動 Supabase Local。
+  # 這驗證的是 Linux + Docker Engine，不代表 Docker Desktop（macOS / Windows）。
+  docker-integration:
+    name: docker integration (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare .env
+        run: cp .env.example .env
+      - name: Build dev container
+        run: docker compose build
+      - name: pnpm install (in dev container)
+        run: docker compose run --rm -T dev pnpm install --frozen-lockfile
+      - name: Create networks (supabase network binds published ports to 127.0.0.1)
+        run: docker compose up --no-start web
+      - name: supabase start (in dev container, via Docker socket)
+        run: docker compose run --rm -T dev pnpm supabase:start
+      - name: env:sync
+        run: docker compose run --rm -T dev pnpm env:sync
+      - name: Start web (next dev)
+        run: docker compose up -d web
+      - name: Wait for web
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then echo "web ready after ${i}x2s"; exit 0; fi
+            sleep 2
+          done
+          echo "web not ready"; exit 1
+      - name: verify:env
+        run: docker compose run --rm -T dev pnpm verify:env
+      - name: verify:hot-reload
+        run: docker compose run --rm -T dev pnpm verify:hot-reload
+      - name: diagnose
+        if: always()
+        run: docker compose run --rm -T dev pnpm diagnose
+      - name: Stop
+        if: always()
+        run: |
+          docker compose run --rm -T dev supabase stop --no-backup || true
+          docker compose down -v || true

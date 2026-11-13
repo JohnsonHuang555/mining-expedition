@@ -1,0 +1,45 @@
+# Supabase 本地開發設定（Supabase CLI v2.122.1）
+# 只列出與預設值不同、或專案需要明確指定的項目；其餘使用 CLI 預設值。
+# 這個檔案只影響 `supabase start` 的本地環境；Supabase Cloud 的設定在 Dashboard 或 `supabase config push`。
+
+project_id = "mining-expedition"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+
+# 關閉 Analytics（Logflare + Vector）：Vector 需要從宿主掛載 Docker socket（路徑取自 DOCKER_HOST），
+# 但 Docker Desktop 上 DOCKER_HOST 是只存在於開發容器內的代理 socket（docker/entrypoint.sh），
+# Vector 會連不到 Docker 而使 `supabase start` 失敗。代價：Studio 的 Logs 頁面沒有資料。
+[analytics]
+enabled = false
+
+[edge_runtime]
+enabled = true
+# oneshot：每個請求都重新載入函式（Hot Reload，本地開發用）；per_worker 用於負載測試
+policy = "oneshot"
+
+# 只用於本地 Edge Runtime；Supabase Cloud 不讀取這一段
+[edge_runtime.secrets]
+EDGE_DIAGNOSTICS = "true"
+
+# 健康檢查：不需要登入。正式環境只回傳 {"ok": boolean}
+[functions.health]
+verify_jwt = false

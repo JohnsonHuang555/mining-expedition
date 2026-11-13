@@ -1,0 +1,46 @@
+# syntax=docker/dockerfile:1.7
+#
+# 本地開發容器（D22）。只用於 Docker Compose 開發環境，不用於 Vercel 或 Supabase Cloud 部署。
+# 內含：Node.js、pnpm、Supabase CLI、Docker CLI（Supabase CLI 透過宿主的 Docker 啟動本地服務）。
+#
+# 版本都固定在 build args，升級時改這裡並重新 build：
+#   docker compose build --no-cache dev
+
+ARG NODE_IMAGE=node:22-bookworm-slim
+ARG DOCKER_CLI_IMAGE=docker:28-cli
+
+FROM ${DOCKER_CLI_IMAGE} AS docker-cli
+
+FROM ${NODE_IMAGE}
+
+# Supabase CLI 固定 v2（v3 於 2026-11 發布，有破壞性變更；是否升級見 TECHNICAL_SPEC §17 T14）
+ARG SUPABASE_CLI_VERSION=2.122.1
+ARG PNPM_VERSION=10.34.9
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git gosu tini procps socat \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in amd64|arm64) ;; *) echo "unsupported architecture: $arch"; exit 1 ;; esac; \
+    curl -fsSL "https://github.com/supabase/cli/releases/download/v${SUPABASE_CLI_VERSION}/supabase_linux_${arch}.tar.gz" \
+      | tar -xz -C /usr/local/bin supabase; \
+    supabase --version
+
+RUN npm install -g "pnpm@${PNPM_VERSION}" && pnpm --version
+
+ENV NEXT_TELEMETRY_DISABLED=1 \
+    npm_config_store_dir=/pnpm-store \
+    PNPM_HOME=/pnpm-home \
+    PATH=/pnpm-home:$PATH
+
+RUN mkdir -p /pnpm-store /pnpm-home && chown node:node /pnpm-store /pnpm-home
+
+COPY docker/entrypoint.sh /usr/local/bin/dev-entrypoint
+RUN chmod 0755 /usr/local/bin/dev-entrypoint
+
+ENTRYPOINT ["tini", "--", "dev-entrypoint"]
+CMD ["bash"]

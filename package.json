@@ -1,0 +1,29 @@
+{
+  "name": "mining-expedition",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @mining/web dev",
+    "build": "pnpm -r --workspace-concurrency=1 run build",
+    "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.scripts.json",
+    "test": "pnpm -r run test",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
+    "supabase:start": "node scripts/check-network.ts && supabase start",
+    "supabase:stop": "supabase stop",
+    "supabase:status": "supabase status",
+    "db:reset": "supabase db reset",
+    "env:sync": "node scripts/env-sync.ts",
+    "verify:env": "node scripts/verify-env.ts",
+    "verify:hot-reload": "node scripts/verify-hot-reload.ts",
+    "diagnose": "node scripts/diagnose.ts",
+    "sim": "node scripts/balance-sim.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "5.9.3"
+  }
+}

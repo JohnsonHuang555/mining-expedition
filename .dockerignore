@@ -1,0 +1,3 @@
+# 開發容器只需要 Dockerfile.dev 與 docker/；原始碼以 bind mount 掛載
+*
+!docker/
