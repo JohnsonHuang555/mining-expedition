@@ -3,5 +3,10 @@
   "imports": {
     "@mining/game-data": "../game-data/src/index.ts"
   },
-  "nodeModulesDir": "none"
+  "nodeModulesDir": "none",
+  "compilerOptions": {
+    "lib": [
+      "deno.window"
+    ]
+  }
 }
