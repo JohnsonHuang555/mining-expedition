@@ -1,11 +1,12 @@
 # 《挖礦探險隊》遊戲企劃書
-**Game Design Document — Version 1.2**
+**Game Design Document — Version 1.3**
 
 | 版本 | 日期 | 變更 |
 |---|---|---|
 | v1.0 | 2026-11-13 | 初版 |
 | v1.1 | 2026-11-13 | 依已確認決策 D1–D10 修正（見 `ANALYSIS_REPORT.md` §1）。詳細規則與數值見 `GBS.md`，技術規格見 `TECHNICAL_SPEC.md` |
 | v1.2 | 2026-11-13 | 依 D11–D17 加入：回訪金幣與寶物倍率、只能回訪較淺礦區、重挖（防卡死）、首次寶物保護 |
+| v1.3 | 2026-11-13 | 首次保護 4 小時（D18）；MVP v1.0 數值基準與版本管理（D19）；離線報告必須先領取（D20）；技術架構（D21）；Docker-first 開發環境（D22） |
 
 | 項目 | 內容 |
 |---|---|
@@ -17,7 +18,7 @@
 | 遊戲模式 | 單人、放置型 |
 | 開發技術 | Next.js、React、TypeScript |
 | 預計版本 | MVP v1.0 |
-| 文件版本 | GDD v1.2 |
+| 文件版本 | GDD v1.3 |
 
 ---
 
@@ -210,7 +211,7 @@ v1.0 的 75% / 20% / 4.5% / 0.5% 單一機率表已由上述規則取代；Epic 
 - 只能觸發一次；離線領取、重登入、切換模式、重試 API、出售該寶物都不會再次觸發。
 - 有效挖掘時間由伺服器計算，不依賴 Client 計時；卡關、空等不累積。
 - 不實作第二次保底、累積機率、隱藏幸運值或重複寶物保護。
-- 觸發門檻**待確認**；模擬建議 4 小時（見 `GBS.md` §20）。
+- 觸發門檻：有效挖掘 4 小時。【D18】
 
 ## 4.2 即時掉落呈現
 
@@ -423,6 +424,12 @@ flowchart TD
 
 玩家按下「領取探險成果」後，所有獎勵一次入帳。
 
+玩家返回遊戲時，必須先領取離線探險成果，才能進行其他遊戲操作。【D20】
+
+- 重複領取不會重複發放獎勵。
+- 多分頁、多裝置同時領取，只會入帳一次。
+- 網路或 API 失敗時可以重試，遊戲不會永久卡在報告畫面。
+
 不要求玩家逐個點擊寶物。
 
 動畫只負責呈現驚喜，不影響實際領取。
@@ -505,6 +512,10 @@ MVP 不需要導入完整 2D 遊戲引擎，使用 CSS Sprite 與簡單動畫即
 | Supabase Auth | 使用者登入 |
 | Supabase PostgreSQL | 遊戲資料持久化 |
 | Vitest | 單元測試 |
+| pnpm workspace | Monorepo 套件管理【D21】 |
+| Supabase Edge Functions | 伺服器結算（執行共用遊戲引擎）【D21】 |
+| Supabase Database Functions | 交易與原子提交【D21】 |
+| Docker Compose | 本機開發環境【D22】 |
 | Vercel | 部署 |
 
 ## 9.2 架構原則
@@ -519,45 +530,26 @@ MVP 不需要導入完整 2D 遊戲引擎，使用 CSS Sprite 與簡單動畫即
 - UI 可以獨立修改。
 - 未來可以替換前端框架或增加其他平台。
 
+目前所有平衡數值為 MVP v1.0 初始版本。未來可依測試結果調整，但必須透過版本管理，不得影響既有玩家資料。【D19】詳見 `GBS.md` §24。
+
 ## 9.3 專案結構
 
+採用 pnpm workspace monorepo，讓 Next.js 與 Supabase Edge Functions 共用同一份純 TypeScript 遊戲引擎。【D21】完整結構見 `TECHNICAL_SPEC.md` §3.4。
+
 ```text
-src/
-├── app/
-│   ├── page.tsx
-│   ├── mining/
-│   ├── inventory/
-│   ├── workshop/
-│   └── collection/
-│
-├── features/
-│   ├── character/
-│   ├── mining/
-│   ├── inventory/
-│   ├── equipment/
-│   ├── crafting/
-│   ├── collection/
-│   └── market/
-│
-├── game-engine/
-│   ├── mining/
-│   ├── drop/
-│   ├── economy/
-│   └── idle/
-│
-├── data/
-│   ├── minerals/
-│   ├── artifacts/
-│   ├── equipment/
-│   ├── recipes/
-│   └── mines/
-│
-├── stores/
-│   └── game-store.ts
-│
-└── lib/
-    └── supabase/
+mining-expedition/
+├── apps/web/               # Next.js（畫面、Zustand store）
+├── packages/game-engine/   # 純 TypeScript 遊戲引擎（Web 與 Edge Functions 共用）
+├── packages/game-data/     # 靜態遊戲資料與 DATA_VERSION
+├── supabase/               # migrations、Database Functions、Edge Functions
+├── scripts/                # 平衡模擬、環境工具
+├── Dockerfile.dev          # 開發容器
+└── compose.yaml            # 開發環境
 ```
+
+## 9.3.1 開發環境 【D22】
+
+採用 Docker-first：本機只需要 Docker Desktop、Git 與編輯器。Node.js、pnpm、Supabase CLI 都在開發容器內執行；Supabase 本地服務由官方 CLI 透過 Docker 管理。詳見 `TECHNICAL_SPEC.md` §15 與 README。
 
 ## 9.4 遊戲資料模型
 
