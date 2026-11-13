@@ -1,10 +1,15 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.0（草案，待審核）**
+**Version 1.1（草案，待審核）**
+
+| 版本 | 變更 |
+|---|---|
+| v1.0 | 初版 |
+| v1.1 | 四層混合式掉落（D7）、回訪規則（D8）、離線上限 12 小時（D9）、十字鎬與解鎖（D10）；新增 `scripts/balance-sim.ts` |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.0、`docs/GBS.md` v1.0、已確認決策 D1–D6 |
+| 依據 | `docs/GDD.md` v1.1、`docs/GBS.md` v1.1、已確認決策 D1–D10 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -82,7 +87,7 @@ flowchart LR
 
 依 Supabase 文件，Edge Function 每個請求的 CPU 時間上限為 2 秒，記憶體 256MB，閒置逾時 150 秒；但另一篇 Supabase 疑難排解文件寫的是 200 毫秒 CPU。**以較保守的 200 毫秒作為設計上限。**
 
-最壞情況估算：離線 8 小時、最快方塊約 6.5 秒 → 約 4,430 個方塊。每個方塊一次 HMAC-SHA256 加數次亂數，預估遠低於 100 毫秒。Phase 1 必須加入效能基準測試（§14.6）。
+最壞情況估算：離線 12 小時、最快方塊約 6.5 秒 → 約 6,650 個方塊。每個方塊一次 HMAC-SHA256 加數次亂數，預估遠低於 100 毫秒。Phase 1 必須加入效能基準測試（§14.6）。
 
 ### 3.4 Repo 結構 【提案 T2】
 
@@ -114,7 +119,7 @@ mining-expedition/
 │   ├── migrations/              # SQL schema、RLS、RPC
 │   ├── functions/               # Edge Functions
 │   └── seed.sql
-├── scripts/balance-sim.ts       # 平衡模擬（GBS §18）
+├── scripts/balance-sim.ts       # 平衡模擬（開發輔助工具，見 §14.4）
 └── docs/
 ```
 
@@ -159,6 +164,27 @@ blockMs     = ceil( Hardness × 10^7 / rate )
 canMine     = power10 ≥ requiredPower10
 ```
 
+四層掉落的 ppm 計算（GBS §7）：
+
+```
+// 第二層：礦物
+rarePpm     = floor( rareBasePpm[zone] × (1,000,000 + luckPpm) / 1,000,000 )
+bundlePpm   = 150,000
+nonePpm     = 1,000,000 − bundlePpm − rarePpm
+
+// 第三層：金幣
+coinPpm     = 100,000
+coinAvg     = coinAvgBySegment[seg] × (revisit ? 1 : 2) / 2           // 回訪 ×0.5
+
+// 第四層：寶物（treasurePerHourMilli：0.35/h → 350）
+chancePpm   = min( 500,000,
+                   floor( treasurePerHourMilli × blockMs × (revisit ? 1 : 2) / (2 × 3,600) ) )
+legPpm      = floor( chancePpm × 100,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
+epicPpm     = floor( chancePpm × 900,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
+```
+
+> 驗算：`treasurePerHourMilli × blockMs / 3,600` 的單位是 ppm（0.35/h × 1 小時 = 350 × 3,600,000 / 3,600 = 350,000 ppm = 35%）。中間值最大約 `350 × 4×10^5 ≈ 1.4 × 10^8`，在安全整數範圍內。
+
 - 最大值：`32,500 × 10^7 = 3.25 × 10^11`，在 JS 安全整數（2^53）與 Postgres `bigint` 範圍內。
 - 強化倍率 `(100 + 10 × levelStep)` 套用在 MVP 的所有基礎值上都能整除；新增資料時需由單元測試保證（§14.1）。
 
@@ -190,12 +216,12 @@ rng    = sfc32( digest[0..15] 拆成 4 個 uint32 )
 - `digCounter`：玩家每完成一個方塊（前線或回訪）就加 1，只由伺服器遞增。
 - `rngSecret`：每位玩家 32 bytes 隨機密鑰，存在 Client 無法讀取的 schema（§8.3）。
 - 因為結果依方塊編號而定，放棄挖到一半的方塊或切換礦區都無法重新抽獎。
-- 一個方塊內的亂數消耗順序固定（GBS §4.3）：
-  1. OreType
-  2. 觸發判定
-  3. 稀有度
-  4. 物品
-  5. 數量（金幣袋金額；礦石包再抽 3 次 OreType）
+- 一個方塊內的亂數消耗順序固定（GBS §4.3、§7）：
+  1. 第一層：OreType（1 次）
+  2. 第二層：礦物判定（1 次）→ 若為礦石包，再抽 3 次 OreType；若為 Rare，再抽 1 次 Rare 表
+  3. 第三層：金幣判定（1 次）→ 若命中，再抽 1 次金額
+  4. 第四層：寶物機會（1 次）→ 若為 Epic，再抽 1 次哪一件
+- 各層都使用 `nextInt(1,000,000)` 與 ppm 機率比較。
 
 ### 6.3 市場亂數
 
@@ -228,7 +254,7 @@ settle(input: {
 elapsed = serverNow − state.lastSettledAt
 
 if state.pendingReportId 存在 → 回傳錯誤 REPORT_PENDING（GBS §15）
-if elapsed > 300,000 ms     → mode = offline，simMs = min(elapsed, 8h)
+if elapsed > 300,000 ms     → mode = offline，simMs = min(elapsed, 12h)   // D9
 else                        → mode = online， simMs = elapsed
 
 t = 0
@@ -249,12 +275,13 @@ while t < simMs and state.status == "mining":
                  若到礦區底部且下一礦區未解鎖 → status = "blocked_unlock"
                  若完成 blockIndex 2999 → status = "frontier_complete"
 
-state.lastSettledAt = serverNow          // 超過 8 小時的部分捨棄（GBS §15）
+state.lastSettledAt = serverNow          // 超過 12 小時的部分捨棄（D9）
 ```
 
 ### 7.3 要點
 
-- **在線與離線共用同一段程式**，只差在獎勵入帳方式與 8 小時上限。
+- **在線與離線共用同一段程式**，只差在獎勵入帳方式與 12 小時上限。
+- 不因領取頻率產生額外倍率：結算只依實際經過時間，沒有任何與呼叫次數相關的加成（D9）。
 - 方塊完成時記錄 `blockMs`（實際挖掘毫秒），作為觸發機率的輸入（GBS §7.1）。
 - 結算中途不會發生購買或強化，所以離線期間 rate 只在套組變化時改變；離線獎勵未入帳，所以 rate 在離線中不變。
 - `status` 為 blocked 時，結算只推進 `lastSettledAt`，沒有產出。
@@ -373,13 +400,13 @@ type ApiResponse<T> =
 
 | 端點 | 請求 | 說明 |
 |---|---|---|
-| `character-create` | `{ name, appearance }` | 建立角色、初始狀態與 `rng_secret`；只能一次 |
+| `character-create` | `{ name, appearance }` | 建立角色、初始狀態（木製十字鎬 Lv1，D10）與 `rng_secret`；只能一次 |
 | `state-get` | `{}` | 結算到現在並回傳完整狀態（登入時呼叫；可能產生離線報告） |
 | `mining-settle` | `{}` | 結算到現在；回傳在線事件或離線報告 |
 | `report-claim` | `{ reportId }` | 領取報告，一次入帳 |
-| `mining-select` | `{ mode, zone }` | 切換前線 / 回訪礦區（GBS §2.4） |
-| `zone-unlock` | `{ zone }` | 解鎖礦區（GBS §12） |
-| `pickaxe-buy` | `{ pickaxeId }` | 購買十字鎬（GBS §10.2） |
+| `mining-select` | `{ mode, zone }` | 切換前線 / 回訪礦區。回訪的 zone 必須已解鎖且比前線所在礦區淺；主線完成後可選全部（GBS §2.3–2.4） |
+| `zone-unlock` | `{ zone }` | 前線已挖完上一區底部時，付費解鎖（D10、GBS §12） |
+| `pickaxe-buy` | `{ pickaxeId }` | 購買下一階十字鎬，必須依序（D10、GBS §10.2） |
 | `pickaxe-equip` | `{ pickaxeId }` | 切換已擁有的十字鎬 |
 | `pickaxe-upgrade` | `{ pickaxeId }` | 強化一級 |
 | `craft` | `{ recipeId, times }` | 製作（GBS §11） |
@@ -523,9 +550,14 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | fixed | 所有十字鎬 × 等級的 `power10` 都能整除；鑽石 Lv3 的 power10 = 360 ≥ 360 |
 | stats | GBS §10.4 的數值表全部相符；套組加成相加規則 |
 | mining | `blockMs` 與 GBS §5 表格相符；換裝後工作量保留；Power 不足時停止 |
-| drop | 稀有度正規化後總和 = 1,000,000 ppm；Luck 0.12 時 Legendary = 5,600 ppm |
+| drop | 每一層的分布總和 = 1,000,000 ppm；Luck 只放大 Rare / Epic / Legendary |
+| drop | Luck 0.12 時：zone1 Rare = 28,000 ppm；寶物 Legendary = `Chance × 0.1 × 1.12` |
+| drop | 回訪：寶物 Chance ×0.5、金幣金額 ×0.5；礦物表不變 |
+| drop | 同一位置只改變強化等級：寶物每小時期望值只隨 Luck 改變（GBS §7.6） |
 | drop | 觸發機率上限為 1,000,000 ppm |
-| settle | 300 秒以內入帳；超過 300 秒產生報告；8 小時上限；超過部分捨棄 |
+| settle | 300 秒以內入帳；超過 300 秒產生報告；12 小時上限；超過部分捨棄 |
+| settle | 回訪模式使用該礦區最深深度帶的 Hardness 與 RequiredPower；不改變 `frontierBlockIndex` |
+| settle | 前線到礦區底部且未付費解鎖時停止（D10） |
 | settle | 遇到門檻停止且保留成果；遇到未解鎖礦區停止 |
 | settle | 有待領取報告時拒絕結算 |
 | collection | 出售後圖鑑紀錄保留；套組在持有時啟動、出售後失效、重新取得後啟動 |
@@ -540,13 +572,16 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 
 ### 14.3 統計測試
 
-- 稀有度抽樣 10^6 次，各稀有度頻率與理論值誤差在 ±3 個標準差內。
+- 每一層抽樣 10^6 次，各結果頻率與理論值誤差在 ±3 個標準差內。
 - 物品權重表抽樣驗證。
 
 ### 14.4 平衡模擬
 
-- `scripts/balance-sim.ts` 使用正式引擎與 `game-data`，以參考玩家策略跑 0–300m。
-- 結果必須符合 GBS §18 的容許範圍，納入 CI。
+- `scripts/balance-sim.ts` 已建立，是**開發輔助工具**，不是遊戲實作。目前內含 GBS v1.1 數值的副本與參考玩家策略。
+- 執行：`node scripts/balance-sim.ts [--runs 1000] [--seed 1] [--policy keep|sellDupes] [--hardness-scale 1.2] [--only profiles] [--json out.json]`（Node 22.18+ 可直接執行 TypeScript，不需安裝套件）。
+- 輸出：各玩家類型的完成時間（平均、中位數、P10、P90）、各礦區收入與時數、回訪 / 前線收益表、Mining Speed 驗證表、無保底風險指標。
+- 引擎完成後，腳本改為匯入 `packages/game-data` 與 `packages/game-engine`，刪除內含的資料副本，避免兩份規則不同步。
+- 結果必須符合 GBS §18 的標準，納入 CI。
 
 ### 14.5 整合測試（本機 Supabase）
 
@@ -557,14 +592,15 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | 同時送出兩個購買請求 | 一個成功，另一個重試後依結果成功或 `INSUFFICIENT_COINS`，金幣不會變負 |
 | 同時領取同一份報告兩次 | 只入帳一次 |
 | Client 修改本機時間 | 收益不變（伺服器不接受 Client 時間） |
-| 離線 7 小時 / 8 小時 / 12 小時 | 收益分別對應 7 / 8 / 8 小時 |
+| 離線 11 小時 / 12 小時 / 16 小時 | 收益分別對應 11 / 12 / 12 小時 |
+| 每 6 小時領取 vs 每 12 小時領取（總時間相同、沒有卡關） | 期望收益相同（D9） |
 | RLS | `authenticated` 無法寫入任何遊戲資料表、無法讀取他人資料、無法讀取 `private` |
 
 整合測試需要能注入伺服器時間：僅在測試環境中，RPC 接受 `p_now_override` 參數；正式環境禁用。【提案 T12】
 
 ### 14.6 效能基準
 
-- 最壞情況（離線 8 小時、最快方塊）的 `settle` 在 Node 上 < 50ms。
+- 最壞情況（離線 12 小時、最快方塊）的 `settle` 在 Node 上 < 50ms。
 - 部署後在 Edge Function 上量測實際 CPU 時間。
 
 ### 14.7 E2E
