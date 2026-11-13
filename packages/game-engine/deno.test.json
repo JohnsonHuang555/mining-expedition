@@ -1,0 +1,7 @@
+{
+  "//": "只供 CI 以 Deno 執行引擎的確定性快照（test/golden-cli.ts）與型別檢查；不需要 node_modules。Edge Function 使用各自目錄的 deno.json。",
+  "imports": {
+    "@mining/game-data": "../game-data/src/index.ts"
+  },
+  "nodeModulesDir": "none"
+}

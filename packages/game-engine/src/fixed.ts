@@ -41,8 +41,45 @@ export function canMine(power10: number, requiredPower10: number): boolean {
   return power10 >= requiredPower10;
 }
 
-function assertPositiveInt(name: string, value: number): void {
+/**
+ * floor(Π numerators / denominator)，全程以 BigInt 計算，結果必須是 safe integer。
+ *
+ * 用於 ppm 機率等「先乘後除」的計算：例如 legPpm 的中間值
+ * `chancePpm × 900,000 × (1,000,000 + luckPpm)` 可達 ~5.4 × 10^17，超過 2^53，
+ * 用 Number 計算會失去精度，Node 與 Postgres 的結果可能不同（TECHNICAL_SPEC §5）。
+ */
+export function mulDivFloor(numerators: readonly number[], denominator: number): number {
+  assertPositiveInt("denominator", denominator);
+  // 快速路徑：乘積 ≤ 2^53 − 1 時以 Number 精確計算，再以餘數修正浮點除法的捨入
+  let fast = 1;
+  for (const n of numerators) {
+    assertNonNegativeInt("numerator", n);
+    fast *= n;
+  }
+  if (fast + denominator <= Number.MAX_SAFE_INTEGER) {
+    let q = Math.floor(fast / denominator);
+    const r = fast - q * denominator; // q × denominator ≤ fast + denominator ≤ 2^53 − 1，仍是精確整數
+    if (r < 0) q -= 1;
+    else if (r >= denominator) q += 1;
+    return q;
+  }
+  let product = 1n;
+  for (const n of numerators) product *= BigInt(n);
+  const result = product / BigInt(denominator);
+  if (result > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new RangeError(`mulDivFloor result exceeds MAX_SAFE_INTEGER`);
+  }
+  return Number(result);
+}
+
+export function assertPositiveInt(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new RangeError(`${name} must be a positive safe integer, got ${value}`);
+  }
+}
+
+export function assertNonNegativeInt(name: string, value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer, got ${value}`);
   }
 }
