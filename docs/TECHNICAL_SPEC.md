@@ -1,16 +1,17 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.2（草案，待審核）**
+**Version 1.3（MVP v1.0 基準）**
 
 | 版本 | 變更 |
 |---|---|
 | v1.0 | 初版 |
 | v1.1 | 四層混合式掉落（D7）、回訪規則（D8）、離線上限 12 小時（D9）、十字鎬與解鎖（D10）；新增 `scripts/balance-sim.ts` |
 | v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
+| v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.2、`docs/GBS.md` v1.2、已確認決策 D1–D17 |
+| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3、已確認決策 D1–D22 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -73,7 +74,7 @@ flowchart LR
     UI --- PRED
 ```
 
-### 3.2 為什麼用 Edge Function + Database Function 【提案 T1】
+### 3.2 為什麼用 Edge Function + Database Function 【決策 D21】
 
 依你的要求優先評估 Supabase Database Function 與 Edge Function：
 
@@ -90,9 +91,9 @@ flowchart LR
 
 最壞情況估算：離線 12 小時、最快方塊約 6.5 秒 → 約 6,650 個方塊。每個方塊一次 HMAC-SHA256 加數次亂數，預估遠低於 100 毫秒。Phase 1 必須加入效能基準測試（§14.6）。
 
-### 3.4 Repo 結構 【提案 T2】
+### 3.4 Repo 結構 【決策 D21】
 
-GDD §9.3 把 `game-engine` 放在 `src/` 內。由於 Edge Function（Deno）也要匯入引擎，建議改為獨立 package：
+GDD §9.3 把 `game-engine` 放在 `src/` 內。由於 Edge Function（Deno）也要匯入引擎，改為 pnpm workspace monorepo：
 
 ```text
 mining-expedition/
@@ -120,13 +121,20 @@ mining-expedition/
 │   ├── migrations/              # SQL schema、RLS、RPC
 │   ├── functions/               # Edge Functions
 │   └── seed.sql
-├── scripts/balance-sim.ts       # 平衡模擬（開發輔助工具，見 §14.4）
+├── scripts/
+│   ├── balance-sim.ts           # 平衡模擬（開發輔助工具，見 §14.4）
+│   ├── env-sync.ts              # 從 supabase status 產生 apps/web/.env.local
+│   └── verify-env.ts            # Web / Edge Functions / Postgres 連線驗證
+├── docker/entrypoint.sh         # 開發容器入口（Docker socket 權限處理）
+├── Dockerfile.dev               # 開發容器：Node、pnpm、Supabase CLI、Docker CLI
+├── compose.yaml                 # 開發環境（§15）
 └── docs/
 ```
 
-> 待驗證：Supabase CLI 打包 Edge Function 時，能否從 `supabase/functions/` 之外的相對路徑匯入 `packages/`。若不行，改用建置步驟把引擎打包進 functions 目錄。Phase 1 第一件事就要確認。
+Edge Function 以函式目錄內的 `deno.json` 對應 `@mining/game-engine` 到 `packages/game-engine/src`（相對路徑）。Supabase 自 2025 年起支援從 `supabase/` 以外匯入檔案；但本地 `functions serve` 曾有回報失敗的案例，**需要在 Docker 環境實測**（Phase 1 驗證項目）。若失敗，備案是建置步驟把引擎複製到 `supabase/functions/_shared/`。
 
-- 套件管理：pnpm workspace。【提案 T3】
+- 引擎原始碼的 import 一律寫副檔名（`./fixed.ts`），讓 Node（Next.js、Vitest）與 Deno 都能直接讀取同一份檔案。
+- 套件管理：pnpm workspace。【決策 D21】
 - 引擎唯一的外部依賴：`@noble/hashes`（同步的 HMAC-SHA256，Node / Deno / 瀏覽器都能用）。【提案 T4】
 
 ---
@@ -136,7 +144,9 @@ mining-expedition/
 - GBS 的所有數值表（礦區、硬度帶、OreType 權重、掉落表、物品、十字鎬、強化、配方、套組、市場參數）以 TS 常數放在 `packages/game-data`。
 - 資料不放資料庫；資料庫只存玩家狀態與 ID 參照。
 - `DATA_VERSION`（整數）每次調整數值時加 1。玩家狀態記錄最後一次結算使用的版本。
-- 數值變更後，下一次結算直接使用新數值；已入帳的物品、已發現的紀錄不回溯調整。【提案 T5】
+- 數值變更後，下一次結算直接使用新數值；已入帳的物品、已發現的紀錄不回溯調整。【決策 D19】
+- 完整規則見 GBS §24：ID 不可刪除或重用、變更紀錄、模擬驗證。
+- `RNG_VERSION`：亂數消耗順序的版本（MVP = 1）。只有改變 §6.2 順序時才加 1，並更新確定性測試快照；舊快照保留，確保舊版本的回放仍可驗證。
 
 ---
 
@@ -187,7 +197,7 @@ epicPpm     = floor( chancePpm × 900,000 / 1,000,000 × (1,000,000 + luckPpm) /
 首次保護：
 
 ```
-PROTECT_MS  = 待確認（模擬建議 4 × 3,600,000，GBS §20）
+PROTECT_MS  = 14,400,000   // 4 小時有效挖掘時間【決策 D18】
 ```
 
 > 驗算：`treasurePerHourMilli × blockMs / 3,600` 的單位是 ppm（0.35/h × 1 小時 = 350 × 3,600,000 / 3,600 = 350,000 ppm = 35%）。中間值最大約 `350 × 4×10^5 ≈ 1.4 × 10^8`，在安全整數範圍內。
@@ -483,6 +493,35 @@ sequenceDiagram
 - 同一個 `Idempotency-Key` 重送時，回傳 `action_log` 中儲存的回應，不再執行。
 - 領取報告時，在同一交易中：檢查 `status = 'pending'` → 改為 `claimed` → 寫入獎勵 → 清除 `pending_report_id`。
 
+### 10.5 離線報告領取流程 【決策 D20】
+
+玩家有待領取的報告時，必須先領取才能進行其他遊戲操作。
+
+**伺服器端**
+
+| 規則 | 實作 |
+|---|---|
+| 阻擋其他操作 | 所有改變狀態的 API（除了 `report-claim`）在 `pending_report_id` 不為空時回傳 `REPORT_PENDING`。`state-get`、`market-get` 等唯讀 API 照常可用 |
+| 原子領取 | `commit_player_state` 以 `select … for update` 鎖定報告列；只有 `status = 'pending'` 才寫入獎勵並改為 `claimed`，同一交易清除 `pending_report_id` |
+| 重送同一個 key | 回傳 `action_log` 中儲存的回應，不再入帳 |
+| 其他分頁 / 裝置用不同 key 領取 | 第二個請求看到 `claimed`，回傳 `REPORT_ALREADY_CLAIMED` 與目前狀態；不會再次入帳 |
+| 同時只有一份報告 | 部分唯一索引：每位玩家最多一筆 `pending`（§8.4） |
+| 領取不可能因遊戲規則失敗 | 領取只做加法（沒有背包上限或其他檢查）；獎勵在產生報告時就已確定。可能失敗的只有網路或基礎設施 |
+| 數值版本變更 | 報告保存具體的物品 ID 與數量；ID 不可刪除（GBS §24），所以任何版本都能領取 |
+| 不受頻率限制 | `report-claim` 不套用結算的 2 秒頻率限制 |
+| 資料異常 | 若報告內容違反不變式（理論上不會發生），回傳 `REPORT_INVALID` 並記錄錯誤；只有 `service_role` 可用的修復函式能處理，Client 不能自行跳過 |
+
+**Client 端**
+
+| 情況 | 行為 |
+|---|---|
+| 進入遊戲時有待領取報告 | 顯示探險成果畫面；其他操作停用 |
+| 按下「領取」 | 產生一個 Idempotency-Key，**重試時沿用同一個 key** |
+| 網路或 API 失敗 | 自動重試（1、2、4、8 秒…最多間隔 30 秒），並顯示「重新嘗試」按鈕與連線狀態；不會永久停在畫面上 |
+| 收到 `REPORT_ALREADY_CLAIMED` | 視為成功：重新讀取狀態並關閉畫面（另一個分頁或裝置已領取） |
+| 其他分頁在報告產生後送出操作 | 收到 `REPORT_PENDING`，該分頁也顯示探險成果畫面 |
+| 重新整理 / 重開瀏覽器 | `state-get` 回傳待領取報告或已領取後的狀態，畫面依此顯示 |
+
 ---
 
 ## 11. 安全
@@ -559,7 +598,8 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | 存檔 | 每次 API 呼叫都在伺服器寫入，Client 不需要手動存檔 |
 | 重新整理 | 重新整理後呼叫 `state-get`，資料不遺失【GDD §13】 |
 | Schema 變更 | 使用 `supabase/migrations`，只能新增，不改寫已發布的 migration |
-| 遊戲數值變更 | 改 `game-data` 並將 `DATA_VERSION` 加 1；見 §4 |
+| 遊戲數值變更 | 改 `game-data` 並將 `DATA_VERSION` 加 1；依 GBS §24 記錄並執行模擬；不回溯既有玩家資料（D19） |
+| 亂數順序變更 | `RNG_VERSION` 加 1，保留舊快照（§4） |
 | 多分頁 / 多裝置 | 由樂觀鎖與伺服器權威處理；任一分頁的結果都以伺服器為準 |
 
 ---
@@ -597,6 +637,24 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | actions | 每個動作的成功與各種失敗條件 |
 | market | 倍率永遠在 Min–Max 範圍內 |
 
+### 14.1.1 MVP v1.0 引擎規則與測試對照 【決策 D18、D19、D20】
+
+| 規則 | 測試案例 |
+|---|---|
+| P2 回訪無限循環 | 回訪 N 個方塊後 `frontierBlockIndex` 不變，`digCounter` 增加 N |
+| P3 切換模式進度歸零 | 切換後 `blockWork`、`blockMs` 為 0；`digCounter` 不變，下一個方塊結果與未切換時相同 |
+| P5 工作量 | 挖到一半換十字鎬，已累積的工作量保留；`blockMs` 與 GBS §5 計算一致 |
+| P6 門檻用 `≥` | `power10 = requiredPower10` 可以挖；少 1 不能挖（含鑽石 Lv3 = 360） |
+| P7 結算順序 | 記錄每方塊的亂數消耗序列，與快照一致（§6.2） |
+| P8 基礎產出 | 每個完成的方塊恰好產出 1 個 OreType 礦物 |
+| P13 稀有度分類 | 寶物定義只有 `epic` / `legendary`；方塊礦物為 Common、寶石為 Rare |
+| P21 十字鎬 | 依序購買；購買後自動裝備；切換保留等級；出售十字鎬被拒絕 |
+| P22 製作 | 一次 N 份、素材不足全部失敗；購買或強化不會自動製作 |
+| P28 在線 / 離線 | 間隔 300,000 ms 直接入帳；300,001 ms 產生報告 |
+| P39 固定保護寶物 | 保護發放 `a_z1_lantern` |
+| D18 門檻 | 有效時間 14,399,999 ms 不發放；≥ 14,400,000 ms 且該方塊無寶物時發放；該方塊有寶物則改為 `obtained` |
+| D20 報告 | 見 §14.5 |
+
 ### 14.2 確定性測試
 
 - 固定 `rngSecret` + 固定狀態 + 固定時間 → 結果與快照（golden file）完全一致。
@@ -629,6 +687,10 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | 離線 11 小時 / 12 小時 / 16 小時 | 收益分別對應 11 / 12 / 12 小時 |
 | 每 6 小時領取 vs 每 12 小時領取（總時間相同、沒有卡關） | 期望收益相同（D9） |
 | 首次保護：同一份離線報告重送領取 / 重登入 / 同時兩個結算請求 | 保護寶物只發放一次 |
+| 報告：兩個分頁同時用不同 key 領取 | 一個成功，另一個 `REPORT_ALREADY_CLAIMED`；只入帳一次 |
+| 報告：領取成功但回應遺失，Client 以同一個 key 重送 | 回傳原回應，不重複入帳 |
+| 報告：有待領取報告時呼叫購買 / 出售 / 切換模式 | `REPORT_PENDING`，狀態不變 |
+| 報告：產生報告後 `DATA_VERSION` 加 1 再領取 | 依報告內容入帳成功 |
 | 首次保護：Client 修改本機時間、長時間卡關空等 | 有效時間不增加 |
 | 重挖：Client 指定 `reworkBand` | 忽略，由伺服器計算 |
 | 防卡死：金幣 0、背包全空的帳號在每個門檻 | 都能透過重挖或回訪恢復（對應 GBS §21） |
@@ -649,13 +711,64 @@ GDD 只列 Vitest。是否加入 Playwright 做 E2E 測試，待確認。【提�
 
 ## 15. 環境與部署
 
+### 15.1 本機開發：Docker-first 【決策 D22】
+
+本機只需要 Docker Desktop、Git 與編輯器。Node.js、pnpm、Supabase CLI 都在開發容器內執行；Supabase 的服務（Postgres、Auth、PostgREST、Edge Runtime、Studio）由容器內的官方 CLI 透過 Docker 啟動。不使用 Supabase Self-hosting。
+
+```mermaid
+flowchart LR
+    subgraph Host["Docker Desktop"]
+        subgraph Compose["compose.yaml"]
+            DEV[dev<br/>Node + pnpm + Supabase CLI + Docker CLI]
+            WEB[web<br/>next dev :3000]
+            FN[functions<br/>supabase functions serve]
+        end
+        subgraph SB["Supabase CLI 建立的容器"]
+            KONG[API gateway :54321]
+            PG[(Postgres :54322)]
+            ER[Edge Runtime]
+            ST[Studio :54323]
+        end
+    end
+    DEV -- docker.sock --> SB
+    FN -- docker.sock --> ER
+    WEB -- host.docker.internal:54321 --> KONG
+    KONG --> ER
+    KONG --> PG
+    ER --> PG
+    Browser -- 127.0.0.1:3000 --> WEB
+    Browser -- 127.0.0.1:54321 --> KONG
+```
+
+| 項目 | 設計 |
+|---|---|
+| 開發容器 | `Dockerfile.dev`：Node 22、pnpm（corepack）、Supabase CLI v2.122.1、Docker CLI |
+| Docker 存取 | Docker-outside-of-Docker：掛載 `/var/run/docker.sock`，Supabase CLI 在宿主的 Docker 上建立容器 |
+| 路徑 | Repo 以**與宿主相同的絕對路徑**掛載到容器（`${PROJECT_ROOT}:${PROJECT_ROOT}`）。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
+| 容器間網路 | `web`、`functions` 透過 `host.docker.internal` 存取 Supabase 發布到宿主的埠（Linux 以 `host-gateway` 對應）；瀏覽器使用 `127.0.0.1` |
+| Hot Reload | `web`：Next.js dev server 監看 bind mount（必要時設 `WATCHPACK_POLLING=true`）；`functions`：`supabase functions serve` 監看檔案變更 |
+| 環境變數 | `.env`（compose 用，由 `.env.example` 複製）；`apps/web/.env.local` 由 `pnpm env:sync` 從 `supabase status` 產生；兩者都不進版控 |
+| 資料持久化 | Postgres 資料在 Supabase CLI 建立的 Docker volume；`supabase stop` 保留資料，`supabase stop --no-backup` 才刪除。pnpm store 在 named volume |
+| 連線驗證 | `pnpm verify:env`：Web → Edge Function → Postgres、Web → PostgREST → Postgres |
+| 指令 | 見 README |
+
+### 15.2 本機安全性
+
+| 風險 | 處理 |
+|---|---|
+| Docker socket 等同宿主的 root 權限 | 只掛載到需要的服務（`dev`、`functions`）；`web` 不掛載；不在容器內執行來源不明的程式碼 |
+| 容器內以 root 執行 | 入口腳本偵測 socket 的群組 ID，把 `node` 使用者加入該群組後以 `node` 執行 |
+| 埠暴露到區網 | compose 發布的埠綁定 `127.0.0.1`；Supabase CLI 發布的埠需在實測時確認綁定位址 |
+| 本地金鑰 | Supabase 本地金鑰只用於開發；`.env`、`.env.local` 列在 `.gitignore`；正式金鑰只存在 Vercel / Supabase secrets |
+| 版本漂移 | Supabase CLI、pnpm、Docker CLI 版本固定在 `Dockerfile.dev` 的 build args |
+
+### 15.3 部署環境
+
 | 環境 | Next.js | Supabase |
 |---|---|---|
-| local | `next dev` | `supabase start`（本機 Docker） |
+| local | 開發容器內 `next dev` | 開發容器內 `supabase start` |
 | preview | Vercel Preview | 獨立 Supabase 專案（staging） |
 | production | Vercel Production | 正式 Supabase 專案 |
-
-環境變數：
 
 | 變數 | 位置 |
 |---|---|
@@ -683,15 +796,15 @@ GDD 只列 Vitest。是否加入 Playwright 做 E2E 測試，待確認。【提�
 
 | # | 項目 |
 |---|---|
-| T1 | 採用 Edge Function + Database Function（§3.2） |
-| T2 | Repo 改為 monorepo（§3.4），與 GDD §9.3 不同 |
-| T3 | 使用 pnpm workspace |
 | T4 | 引擎依賴 `@noble/hashes` |
-| T5 | 數值變更不回溯已入帳的物品 |
+| T6–T8 | 定點數、亂數、市場實作細節（依本文件實作，測試時確認） |
 | T9 | 結算排程參數（5 秒 / 60 秒 / 300 秒） |
 | T10 | 單頁 Tab 路由 |
 | T12 | 測試環境可注入伺服器時間 |
 | T13 | 是否加入 Playwright E2E |
+| T14 | Supabase CLI 是否升級到 v3（目前固定 v2.122.1，§15.1） |
+| T15 | Edge Function 匯入 `packages/` 在本地 `functions serve` 是否可行（§3.4，Phase 1 實測） |
 | — | 是否需要訪客模式（C-4）。本規格假設**必須登入**，因為伺服器權威需要身分 |
-| — | 首次保護門檻 `PROTECT_MS`（D17，建議 4 小時） |
-| — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次），所以不能靠重建角色重複取得；多帳號不在 MVP 防範範圍內 |
+| — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次）；多帳號不在 MVP 防範範圍內 |
+
+已定案：T1、T2（D21）、T3 pnpm（D21）、T5 不回溯（D19）、首次保護門檻（D18）。
