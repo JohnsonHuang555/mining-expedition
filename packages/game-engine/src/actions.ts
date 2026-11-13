@@ -50,6 +50,8 @@ export type GameAction =
   | { type: "claim_report"; reportId: string };
 
 export interface ActionContext {
+  /** 伺服器時間；領取報告時必須提供（D24：領取時間成為新的結算基準） */
+  serverNow?: number;
   /** 當日市場倍率（ppm，GBS §13），出售寶物時必須提供；由伺服器的 market_prices 載入 */
   marketMultiplierPpm?: Partial<Record<ArtifactId, number>>;
 }
@@ -175,7 +177,7 @@ export function applyAction(input: PlayerGameState, action: GameAction, ctx: Act
   if (!parsed.ok) return parsed;
   const a = parsed.action;
 
-  if (a.type === "claim_report") return claimReport(input, a.reportId);
+  if (a.type === "claim_report") return claimReport(input, a.reportId, ctx.serverNow);
   if (input.pendingOfflineReport) return fail("REPORT_PENDING", "claim the pending offline report first");
 
   const state = cloneState(input);
@@ -302,17 +304,25 @@ export function applyAction(input: PlayerGameState, action: GameAction, ctx: Act
 
 /**
  * 領取離線報告（TECHNICAL_SPEC §10.5）：一次入帳；不可能因遊戲規則失敗。
- * 提交時必須與「報告狀態改為 claimed」在同一個交易中（見 PR / TECHNICAL_SPEC §10.6）。
+ * 提交時必須與「報告狀態改為 claimed」在同一個交易中（TECHNICAL_SPEC §10.6）。
+ *
+ * D24：待領取期間挖掘暫停。領取時 lastSettledAt = serverNow，等待的時間不產出、不累積有效挖掘時間，
+ * 也不會在下一次請求變成另一份離線報告。未完成方塊的工作量保留。
  */
-function claimReport(input: PlayerGameState, reportId: string): ActionResult {
+function claimReport(input: PlayerGameState, reportId: string, serverNow: number | undefined): ActionResult {
   const r = input.pendingOfflineReport;
   if (!r) {
     if (input.lastClaimedReportId === reportId) return fail("REPORT_ALREADY_CLAIMED", `report ${reportId} was already claimed`);
     return fail("REPORT_NOT_FOUND", `no pending report ${reportId}`);
   }
   if (r.reportId !== reportId) return fail("REPORT_NOT_FOUND", `pending report is ${r.reportId}, not ${reportId}`);
+  if (typeof serverNow !== "number" || !Number.isSafeInteger(serverNow) || serverNow < input.lastSettledAt) {
+    return fail("INVALID_TIME", "claim requires serverNow >= lastSettledAt");
+  }
 
   const state = cloneState(input);
+  const pausedMs = serverNow - input.lastSettledAt;
+  state.lastSettledAt = serverNow; // D24：等待領取的時間不補算
   const events: GameEvent[] = [];
   const setsBefore = activeSets(heldCountsOf(state.heldArtifacts));
   state.coins = addSafe(state.coins, r.rewards.coins);
@@ -331,6 +341,7 @@ function claimReport(input: PlayerGameState, reportId: string): ActionResult {
     coins: r.rewards.coins,
     items: { ...r.rewards.items },
     artifactInstanceIds: r.rewards.artifacts.map((a) => a.instanceId),
+    pausedMs,
   });
   pushSetChanges(events, setsBefore, activeSets(heldCountsOf(state.heldArtifacts))); // 領取後套組才生效（P20）
   return { ok: true, state, changed: true, events };

@@ -79,6 +79,7 @@ describe("時間與挖掘", () => {
       expect(r.report?.rewards ?? { coins: 0, items: {}, artifacts: [] }).toEqual({ coins: 0, items: {}, artifacts: [] });
     }
     expect(settleAt(s, T0 + 200_000).events).toEqual([{ type: "mining_stopped", status: "blocked_power" }]);
+    expect(settleAt(s, T0 + 5 * HOUR).report).toBeNull(); // D23
   });
 
   it("挖到門檻當下停止：剩餘時間不會多產生方塊", () => {
@@ -95,7 +96,7 @@ describe("時間與挖掘", () => {
     const r = settleAt(s, T0 + HOUR);
     expect(r.state.mining.frontierBlockIndex).toBe(1000);
     expect(r.summary.stopReason).toBe("blocked_unlock");
-    const claimed = ok(applyAction(r.state, { type: "claim_report", reportId: r.report!.reportId })).state;
+    const claimed = ok(applyAction(r.state, { type: "claim_report", reportId: r.report!.reportId }, { serverNow: r.state.lastSettledAt })).state;
     const unlocked = ok(applyAction(claimed, { type: "unlock_zone", zone: 1 })).state;
     expect(settleAt(unlocked, unlocked.lastSettledAt + 200_000).state.mining.frontierBlockIndex).toBeGreaterThan(1000);
   });
@@ -129,7 +130,7 @@ describe("時間與挖掘", () => {
     expect(r30.state.mining).toEqual(r12.state.mining);
     expect(r30.state.lastSettledAt).toBe(T0 + 30 * HOUR);
     // 領取後再結算：只處理領取之後的時間
-    const claimed = ok(applyAction(r30.state, { type: "claim_report", reportId: r30.report!.reportId })).state;
+    const claimed = ok(applyAction(r30.state, { type: "claim_report", reportId: r30.report!.reportId }, { serverNow: r30.state.lastSettledAt })).state;
     const after = settleAt(claimed, claimed.lastSettledAt + 1000);
     expect(after.summary.simulatedMs).toBe(1000);
   });
@@ -237,7 +238,7 @@ describe("獎勵", () => {
     for (let cycle = 0; cycle < 6; cycle++) {
       const res = ok(settle(s, { serverNow: s.lastSettledAt + 3 * HOUR, rng: r, options: { recordBlocks: true } }));
       grants += res.blocks.filter((b) => b.protection).length;
-      s = ok(applyAction(res.state, { type: "claim_report", reportId: res.report!.reportId })).state;
+      s = res.report ? ok(applyAction(res.state, { type: "claim_report", reportId: res.report.reportId }, { serverNow: res.state.lastSettledAt })).state : res.state;
       expect(s.firstTreasure.reportId).toBeNull();
       // 出售保護寶物後也不會再發放
       const lantern = s.heldArtifacts.find((a) => a.source === "first_treasure_protection");
@@ -289,7 +290,7 @@ describe("獎勵", () => {
     const extra = { instanceId: `d${pending.mining.digCounter - 1}`, artifactId: "a_z1_map" as const, obtainedAt: T0 + HOUR, mode: "frontier" as const, band: 1, frontierBlockIndex: 150, digCounter: pending.mining.digCounter - 1, source: "drop" as const, isNewDiscovery: true };
     pending.pendingOfflineReport!.rewards.artifacts = [extra];
     const before = currentStats(pending).speed1000;
-    const claimed = ok(applyAction(pending, { type: "claim_report", reportId: r.report!.reportId }));
+    const claimed = ok(applyAction(pending, { type: "claim_report", reportId: r.report!.reportId }, { serverNow: pending.lastSettledAt }));
     expect(claimed.events).toContainEqual({ type: "set_changed", setId: "old_miner", active: true });
     expect(currentStats(claimed.state).speed1000).toBe(Math.floor((before * 103) / 100));
     expect(claimed.state.discoveredArtifacts.a_z1_map).toMatchObject({ totalFound: 1, firstDiscoveredAt: T0 + HOUR });
@@ -304,3 +305,58 @@ describe("獎勵", () => {
     expect(settleAt(s, T0 + ms - 1).summary.blocksMined).toBe(0);
   });
 });
+
+describe("離線報告的建立與等待期間（D23、D24）", () => {
+  it("D23：離線期間沒有完成任何方塊 → 不建立報告，只推進時間並回報停止原因", () => {
+    for (const s of [makeState({ frontier: 500 }), makeState({ tier: 2, frontier: 1000 }), makeState({ tier: 4, level: 5, frontier: 3000, unlockedZone: 2 })]) {
+      const r = settleAt(s, T0 + 6 * HOUR);
+      expect(r.summary.kind).toBe("offline");
+      expect(r.summary.blocksMined).toBe(0);
+      expect(r.report).toBeNull();
+      expect(r.state.pendingOfflineReport).toBeNull();
+      expect(r.state.lastSettledAt).toBe(T0 + 6 * HOUR);
+      expect(r.events).toEqual([{ type: "mining_stopped", status: r.summary.stopReason }]);
+      // 不會擋住玩家操作
+      expect(applyAction(r.state, { type: "select_mining_mode", mode: "frontier" }).ok).toBe(true);
+    }
+  });
+
+  it("D23：離線但只挖了未完成方塊的一部分 → 不建立報告，工作量保留", () => {
+    const s = makeState({ tier: 4, frontier: 2999, unlockedZone: 2, level: 3 }); // 鑽石 Lv3 挖 290m 一個方塊約 373 秒
+    const r = settleAt(s, T0 + 350_000);
+    expect(r.summary.kind).toBe("offline");
+    expect(r.report).toBeNull();
+    expect(r.state.mining.blockMs).toBe(350_000);
+    expect(r.state.mining.blockWork).toBeGreaterThan(0);
+  });
+
+  it("D23：只要完成至少 1 個方塊就建立報告", () => {
+    const r = settleAt(makeState({ frontier: 499 }), T0 + 6 * HOUR);
+    expect(r.summary.blocksMined).toBe(1);
+    expect(r.report).not.toBeNull();
+  });
+
+  it("D24：待領取期間挖掘暫停；領取時以領取時間為基準，不補算、不連續跳報告", () => {
+    const base = settleAt(makeState({ tier: 1, frontier: 100 }), T0 + 3 * HOUR);
+    const waited = 2 * HOUR; // 停在報告畫面 2 小時
+    const claimAt = base.state.lastSettledAt + waited;
+    const claimed = ok(applyAction(base.state, { type: "claim_report", reportId: base.report!.reportId }, { serverNow: claimAt }));
+    expect(claimed.state.lastSettledAt).toBe(claimAt);
+    expect(claimed.events).toContainEqual(expect.objectContaining({ type: "report_claimed", pausedMs: waited }));
+    // 暫停期間：深度、方塊序號、未完成方塊、有效挖掘時間都不變
+    expect(claimed.state.mining).toEqual(base.state.mining);
+    expect(claimed.state.firstTreasure.effectiveMiningMs).toBe(base.state.firstTreasure.effectiveMiningMs);
+    // 下一次操作是在線結算，不會產生第二份報告
+    const next = settleAt(claimed.state, claimAt + 10_000);
+    expect(next.summary.kind).toBe("online");
+    expect(next.report).toBeNull();
+  });
+
+  it("D24：領取必須提供不早於 lastSettledAt 的 serverNow", () => {
+    const base = settleAt(makeState({ tier: 1, frontier: 100 }), T0 + 3 * HOUR);
+    const id = base.report!.reportId;
+    expect(applyAction(base.state, { type: "claim_report", reportId: id })).toMatchObject({ ok: false, error: { code: "INVALID_TIME" } });
+    expect(applyAction(base.state, { type: "claim_report", reportId: id }, { serverNow: base.state.lastSettledAt - 1 })).toMatchObject({ ok: false, error: { code: "INVALID_TIME" } });
+  });
+});
+

@@ -15,7 +15,7 @@
 import { type ActionContext, type GameAction, applyAction, parseAction } from "./actions.ts";
 import { type GameError, gameError } from "./errors.ts";
 import type { GameEvent } from "./events.ts";
-import { type SettleContext, type SettleSummary, settle } from "./settle.ts";
+import { type SettleContext, type SettleSummary, checkLoadedState, settle } from "./settle.ts";
 import type { OfflineReport, PlayerGameState } from "./state.ts";
 
 export type GameCommand = GameAction | { type: "settle" };
@@ -26,7 +26,7 @@ export interface GameRequest {
   command: GameCommand;
 }
 
-export interface RequestContext extends SettleContext, ActionContext {}
+export interface RequestContext extends SettleContext, Omit<ActionContext, "serverNow"> {}
 
 export interface CommitPlan {
   /** 要寫入的新狀態；stateVersion = expectedStateVersion + 1 */
@@ -74,8 +74,12 @@ export function canonicalCommandJson(command: GameCommand): string {
 }
 
 export function executeRequest(input: PlayerGameState, request: GameRequest, ctx: RequestContext): RequestResult {
-  const base = { requestId: request?.requestId, expectedStateVersion: input.stateVersion, state: input, events: [] as GameEvent[], settlement: null };
+  const loadErr = checkLoadedState(input); // 不可信的快照：先驗證，任何結構錯誤都回傳 INVALID_STATE
+  const malformed = loadErr?.code === "INVALID_STATE";
+  const expectedStateVersion = malformed ? -1 : input.stateVersion;
+  const base = { requestId: request?.requestId, expectedStateVersion, state: input, events: [] as GameEvent[], settlement: null };
   const reject = (error: GameError, command: GameCommand["type"] | null = null): RequestResult => ({ ...base, ok: false, command, error, commit: null });
+  if (malformed) return reject(loadErr!);
 
   if (typeof request?.requestId !== "string" || request.requestId.length === 0 || request.requestId.length > MAX_REQUEST_ID_LENGTH) {
     return reject(gameError("INVALID_REQUEST", "requestId must be a non-empty string"));

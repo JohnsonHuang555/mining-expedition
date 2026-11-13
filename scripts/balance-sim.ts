@@ -343,7 +343,8 @@ const BASE_MARKET = Object.fromEntries(GD.ARTIFACT_IDS.map((id) => [id, 1_000_00
 
 /** 套用一個玩家操作；策略只送出合法的操作，失敗代表模擬器或引擎有錯 */
 function act(p: Player, action: GameAction): void {
-  const r = applyAction(p.gs, action, { marketMultiplierPpm: BASE_MARKET });
+  // 模擬器在結算的同一時刻操作（serverNow = lastSettledAt）；領取報告時等待時間為 0（D24）
+  const r = applyAction(p.gs, action, { marketMultiplierPpm: BASE_MARKET, serverNow: p.gs.lastSettledAt });
   if (!r.ok) throw new Error(`sim action ${JSON.stringify(action)} failed: ${r.error.code} ${r.error.message}`);
   for (const e of r.events) {
     if (e.type === "items_sold" || e.type === "artifacts_sold") gain(p, e.coins);

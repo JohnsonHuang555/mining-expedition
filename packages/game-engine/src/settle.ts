@@ -4,7 +4,9 @@
  * 純函式：不讀時鐘、不連資料庫、不修改傳入的狀態。相同的（狀態, serverNow, 亂數）永遠得到相同結果。
  * 在線與離線共用同一個挖掘迴圈，只差在：
  *   - 在線（經過 ≤ 300 秒）：獎勵直接入帳，套組可能在下一個方塊改變 Speed / Luck
- *   - 離線（經過 > 300 秒）：最多模擬 12 小時，獎勵放進待領取報告，期間數值不變
+ *   - 離線（經過 > 300 秒）：最多模擬 12 小時，獎勵放進待領取報告，期間數值不變；
+ *     沒有完成任何方塊時不建立報告，只推進時間（D23）
+ * 有待領取報告時挖掘暫停，不結算；領取時以領取時間為新的時間基準，等待的時間不補算（D24，actions.ts）。
  * 方塊的完成、四層掉落、首次保護都使用 PR #3 的 advanceWork / rollBlock / firstTreasureStep。
  */
 
@@ -98,11 +100,12 @@ export function addItems(target: Inventory, items: Partial<Record<string, number
 }
 
 /** 載入狀態的共同檢查（settle 與 actions 共用） */
-export function checkLoadedState(state: PlayerGameState): GameError | null {
+export function checkLoadedState(state: unknown): GameError | null {
   const issues = validateState(state);
   if (issues.length > 0) return gameError("INVALID_STATE", issues.join("; "));
-  if (state.rngVersion !== RNG_VERSION) return gameError("RNG_VERSION_MISMATCH", `state rngVersion ${state.rngVersion} != engine ${RNG_VERSION}`);
-  if (state.dataVersion > DATA_VERSION) return gameError("DATA_VERSION_UNSUPPORTED", `state dataVersion ${state.dataVersion} > engine ${DATA_VERSION}`);
+  const st = state as PlayerGameState;
+  if (st.rngVersion !== RNG_VERSION) return gameError("RNG_VERSION_MISMATCH", `state rngVersion ${st.rngVersion} != engine ${RNG_VERSION}`);
+  if (st.dataVersion > DATA_VERSION) return gameError("DATA_VERSION_UNSUPPORTED", `state dataVersion ${st.dataVersion} > engine ${DATA_VERSION}`);
   return null;
 }
 
@@ -117,7 +120,7 @@ export function settle(input: PlayerGameState, ctx: SettleContext): SettleResult
   if (ctx.serverNow < input.lastSettledAt) {
     return { ok: false, error: gameError("INVALID_TIME", `serverNow ${ctx.serverNow} is before lastSettledAt ${input.lastSettledAt}`) };
   }
-  // D20：有待領取的報告時不結算（等待領取的時間在領取後才結算，GBS §7.7）
+  // D20 / D24：有待領取的報告時挖掘暫停、不結算；領取時才更新時間基準（等待的時間不補算）
   if (input.pendingOfflineReport) return { ok: false, error: gameError("REPORT_PENDING", "claim the pending offline report first") };
 
   const elapsedMs = ctx.serverNow - input.lastSettledAt;
@@ -272,12 +275,16 @@ export function settle(input: PlayerGameState, ctx: SettleContext): SettleResult
 
   const idleMs = simulatedMs - t;
   if (stopReason === "none" && discardedMs > 0) stopReason = "offline_cap";
-  if (!offline && idleMs > 0 && stopReason !== "none") events.push({ type: "mining_stopped", status: stopReason as Exclude<StopReason, "none" | "offline_cap"> });
+  // D23：離線期間沒有完成任何方塊時不建立報告（不會因為空報告擋住玩家）
+  const createReport = offline && blocksMined > 0;
+  if (!createReport && idleMs > 0 && stopReason !== "none" && stopReason !== "offline_cap") {
+    events.push({ type: "mining_stopped", status: stopReason });
+  }
 
   state.lastSettledAt = ctx.serverNow; // 超過 12 小時的部分捨棄，不會再被結算（D9）
 
   let report: OfflineReport | null = null;
-  if (offline && reportId) {
+  if (createReport && reportId) {
     report = {
       reportId,
       periodStart,

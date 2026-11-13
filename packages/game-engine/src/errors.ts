@@ -6,7 +6,7 @@
 export type GameErrorCode =
   | "INVALID_REQUEST" //       參數不合法（型別、範圍、未知 ID、負數、超大整數）
   | "INVALID_STATE" //         載入的狀態違反不變式（不應發生；不可提交）
-  | "INVALID_TIME" //          serverNow 早於 lastSettledAt
+  | "INVALID_TIME" //          serverNow 早於 lastSettledAt（或領取時未提供）
   | "RNG_VERSION_MISMATCH" //  狀態的 rngVersion 與引擎不同
   | "DATA_VERSION_UNSUPPORTED" // 狀態的 dataVersion 比引擎新
   | "REPORT_PENDING" //        有待領取的離線報告（D20）

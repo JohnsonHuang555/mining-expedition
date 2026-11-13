@@ -37,7 +37,7 @@ export type GameEvent =
   | { type: "set_changed"; setId: SetId; active: boolean }
   | { type: "first_treasure_resolved"; status: "obtained" | "granted"; instanceId: string; artifactId: ArtifactId; source: ArtifactSource }
   | { type: "report_created"; reportId: string }
-  | { type: "report_claimed"; reportId: string; coins: number; items: Inventory; artifactInstanceIds: string[] }
+  | { type: "report_claimed"; reportId: string; coins: number; items: Inventory; artifactInstanceIds: string[]; /** 待領取期間（暫停、不補算，D24） */ pausedMs: number }
   | { type: "pickaxe_purchased"; pickaxeId: PickaxeId }
   | { type: "pickaxe_equipped"; pickaxeId: PickaxeId }
   | { type: "pickaxe_upgraded"; pickaxeId: PickaxeId; level: number }

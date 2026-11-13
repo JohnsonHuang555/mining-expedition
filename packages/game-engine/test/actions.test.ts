@@ -11,7 +11,7 @@ import {
 import { BASE_MARKET, HOUR, T0, deepFreeze, makeState, rng } from "./support/fixtures.ts";
 
 const act = (s: PlayerGameState, a: GameAction | Record<string, unknown>, market = BASE_MARKET) =>
-  applyAction(deepFreeze(s), a as GameAction, { marketMultiplierPpm: market });
+  applyAction(deepFreeze(s), a as GameAction, { marketMultiplierPpm: market, serverNow: s.lastSettledAt });
 const okState = (s: PlayerGameState, a: GameAction | Record<string, unknown>, market = BASE_MARKET): PlayerGameState => {
   const r = act(s, a, market);
   if (!r.ok) throw new Error(`expected ok: ${r.error.code} ${r.error.message}`);
