@@ -1,15 +1,16 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.1（草案，待審核）**
+**Version 1.2（草案，待審核）**
 
 | 版本 | 變更 |
 |---|---|
 | v1.0 | 初版 |
 | v1.1 | 四層混合式掉落（D7）、回訪規則（D8）、離線上限 12 小時（D9）、十字鎬與解鎖（D10）；新增 `scripts/balance-sim.ts` |
+| v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.1、`docs/GBS.md` v1.1、已確認決策 D1–D10 |
+| 依據 | `docs/GDD.md` v1.2、`docs/GBS.md` v1.2、已確認決策 D1–D17 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -174,13 +175,19 @@ nonePpm     = 1,000,000 − bundlePpm − rarePpm
 
 // 第三層：金幣
 coinPpm     = 100,000
-coinAvg     = coinAvgBySegment[seg] × (revisit ? 1 : 2) / 2           // 回訪 ×0.5
+coinAvg     = coinAvgBySegment[seg] × (frontier ? 2 : 1) / 2          // 回訪 ×0.5（D12）、重挖 ×0.5（暫定）
 
 // 第四層：寶物（treasurePerHourMilli：0.35/h → 350）
 chancePpm   = min( 500,000,
-                   floor( treasurePerHourMilli × blockMs × (revisit ? 1 : 2) / (2 × 3,600) ) )
+                   floor( treasurePerHourMilli × blockMs × (frontier ? 2 : 1) / (2 × 3,600) ) )   // 回訪 / 重挖 ×0.5
 legPpm      = floor( chancePpm × 100,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
 epicPpm     = floor( chancePpm × 900,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
+```
+
+首次保護：
+
+```
+PROTECT_MS  = 待確認（模擬建議 4 × 3,600,000，GBS §20）
 ```
 
 > 驗算：`treasurePerHourMilli × blockMs / 3,600` 的單位是 ppm（0.35/h × 1 小時 = 350 × 3,600,000 / 3,600 = 350,000 ppm = 35%）。中間值最大約 `350 × 4×10^5 ≈ 1.4 × 10^8`，在安全整數範圍內。
@@ -222,6 +229,8 @@ rng    = sfc32( digest[0..15] 拆成 4 個 uint32 )
   3. 第三層：金幣判定（1 次）→ 若命中，再抽 1 次金額
   4. 第四層：寶物機會（1 次）→ 若為 Epic，再抽 1 次哪一件
 - 各層都使用 `nextInt(1,000,000)` 與 ppm 機率比較。
+- 前線、回訪、重挖共用同一個 `digCounter`；切換模式只會放棄未完成方塊的進度，不會改變下一個方塊的亂數（D16）。
+- 首次寶物保護（GBS §7.7）**不消耗亂數**：在第四層判定之後檢查，若發放就直接加入固定 Epic，所以之後所有方塊的結果與沒有保護時相同（D17）。
 
 ### 6.3 市場亂數
 
@@ -258,7 +267,8 @@ if elapsed > 300,000 ms     → mode = offline，simMs = min(elapsed, 12h)   // 
 else                        → mode = online， simMs = elapsed
 
 t = 0
-while t < simMs and state.status == "mining":
+while t < simMs and canMine(state):          // 前線：未卡關；回訪 / 重挖：Power ≥ 該位置 RequiredPower
+    spot      = 前線方塊 | 回訪礦區最深帶 | 重挖深度帶（GBS §2.2）
     rate      = 依目前裝備與「目前持有」的套組計算
     needWork  = Hardness × 10^7 − state.blockWork
     needMs    = ceil(needWork / rate)
@@ -267,13 +277,20 @@ while t < simMs and state.status == "mining":
         state.blockMs   += simMs − t
         break
     t += needMs
-    完成方塊（GBS §4.3）：亂數 = rngFactory(state.digCounter)
+    完成方塊（GBS §4.3）：亂數 = rngFactory(state.digCounter)；金幣與寶物倍率依模式（GBS §2.2）
+    首次保護（GBS §7.7）：
+        effectiveMiningMs += blockMs
+        if firstTreasure == "pending":
+            if 本方塊有寶物 → firstTreasure = "obtained"
+            elif effectiveMiningMs ≥ PROTECT_MS → 加入固定 Epic；firstTreasure = "granted"
     state.digCounter += 1；state.blockWork = 0；state.blockMs = 0
     if mode == online: 獎勵直接入帳（套組可能立即改變 rate）
     else:              獎勵累加到報告草稿（不入帳，rate 不變）
-    推進到下一方塊；若 Power 不足 → status = "blocked_power"
-                 若到礦區底部且下一礦區未解鎖 → status = "blocked_unlock"
-                 若完成 blockIndex 2999 → status = "frontier_complete"
+    只有前線模式推進 frontierBlockIndex；
+    前線：若 Power 不足 → status = "blocked_power"
+          若到礦區底部且下一礦區未解鎖 → status = "blocked_unlock"
+          若完成 blockIndex 2999 → status = "frontier_complete"
+    回訪 / 重挖：不改變 frontierBlockIndex 與 status，持續循環（離線也一樣）
 
 state.lastSettledAt = serverNow          // 超過 12 小時的部分捨棄（D9）
 ```
@@ -284,7 +301,8 @@ state.lastSettledAt = serverNow          // 超過 12 小時的部分捨棄（D9
 - 不因領取頻率產生額外倍率：結算只依實際經過時間，沒有任何與呼叫次數相關的加成（D9）。
 - 方塊完成時記錄 `blockMs`（實際挖掘毫秒），作為觸發機率的輸入（GBS §7.1）。
 - 結算中途不會發生購買或強化，所以離線期間 rate 只在套組變化時改變；離線獎勵未入帳，所以 rate 在離線中不變。
-- `status` 為 blocked 時，結算只推進 `lastSettledAt`，沒有產出。
+- 前線 `status` 為 blocked 且模式為前線時，結算只推進 `lastSettledAt`，沒有產出，也不累積有效挖掘時間。
+- 首次保護的狀態變更與報告（或在線入帳）在同一次 `commit_player_state` 交易中寫入；重送請求、重登入、重複領取都不會再次發放（§10.4）。
 
 ---
 
@@ -304,8 +322,9 @@ interface PlayerGameState {
   unlockedZones: ZoneId[];
 
   mining: {
-    mode: "frontier" | "revisit";
-    zone: ZoneId;
+    mode: "frontier" | "revisit" | "rework";
+    zone: ZoneId;                // 回訪礦區
+    reworkBand: number | null;   // 重挖深度帶，由伺服器計算（GBS §2.4）
     frontierBlockIndex: number;  // 0–3000；最大深度 = frontierBlockIndex / 10
     digCounter: number;
     blockWork: number;           // 目前方塊已累積的工作量
@@ -318,6 +337,13 @@ interface PlayerGameState {
   artifacts: ArtifactInstance[];               // 目前持有的寶物實例
   collection: Record<ArtifactId, CollectionRecord>;
   pendingReportId: string | null;
+
+  firstTreasure: {               // GBS §7.7（D17）
+    status: "pending" | "obtained" | "granted";
+    effectiveMiningMs: number;   // 只累積已完成方塊的 blockMs
+    resolvedAt: number | null;
+    artifactInstanceId: string | null;  // 保護發放時的實例
+  };
 }
 
 interface ArtifactInstance {     // 取代 GDD §4.3 的 Artifact 介面
@@ -346,7 +372,8 @@ interface CollectionRecord {
 | 資料表 | 主鍵 | 主要欄位 | 備註 |
 |---|---|---|---|
 | `players` | `id`（= `auth.uid()`） | `name`、`appearance`、`coins bigint`、`equipped_pickaxe`、`version int`、`data_version int`、`created_at` | `name` 唯一性：待確認 C-3 |
-| `mining_state` | `player_id` | 對應 `PlayerGameState.mining` 的各欄位、`pending_report_id` | 一對一 |
+| `mining_state` | `player_id` | 對應 `PlayerGameState.mining` 的各欄位（含 `mode`、`rework_band`）、`pending_report_id` | 一對一 |
+| `first_treasure` | `player_id` | `status`（check in pending / obtained / granted）、`effective_mining_ms bigint`、`resolved_at`、`artifact_instance_id` | 一對一；`status` 只能從 `pending` 轉出一次（RPC 檢查 + trigger 禁止改回） |
 | `player_pickaxes` | `(player_id, pickaxe_id)` | `level smallint` | |
 | `zone_unlocks` | `(player_id, zone_id)` | `unlocked_at` | |
 | `inventory_items` | `(player_id, item_id)` | `quantity bigint check ≥ 0` | |
@@ -372,7 +399,7 @@ interface CollectionRecord {
 
 ## 9. 寶物市場實作 【提案 T8】
 
-- 價格依 GBS §13.2 逐日遞推。
+- 價格依 GBS §13 逐日遞推。
 - **延遲生成**：讀取價格時，若某日尚未生成，從最後一筆生成到今天，並 `insert ... on conflict do nothing`。
 - `pg_cron` 每日 Asia/Taipei 00:00（UTC 16:00）預先生成，作為優化；沒跑到也不影響正確性。
 - 出售寶物時，使用伺服器當下日期的倍率。
@@ -404,9 +431,9 @@ type ApiResponse<T> =
 | `state-get` | `{}` | 結算到現在並回傳完整狀態（登入時呼叫；可能產生離線報告） |
 | `mining-settle` | `{}` | 結算到現在；回傳在線事件或離線報告 |
 | `report-claim` | `{ reportId }` | 領取報告，一次入帳 |
-| `mining-select` | `{ mode, zone }` | 切換前線 / 回訪礦區。回訪的 zone 必須已解鎖且比前線所在礦區淺；主線完成後可選全部（GBS §2.3–2.4） |
+| `mining-select` | `{ mode, zone? }` | 切換前線 / 回訪 / 重挖。回訪的 zone 必須已解鎖且比前線所在礦區淺，主線完成後可選全部（D15）；重挖只在前線卡關時可用，深度帶由伺服器計算，不接受 Client 指定（D16） |
 | `zone-unlock` | `{ zone }` | 前線已挖完上一區底部時，付費解鎖（D10、GBS §12） |
-| `pickaxe-buy` | `{ pickaxeId }` | 購買下一階十字鎬，必須依序（D10、GBS §10.2） |
+| `pickaxe-buy` | `{ pickaxeId }` | 購買下一階十字鎬，必須依序（D10、GBS §10） |
 | `pickaxe-equip` | `{ pickaxeId }` | 切換已擁有的十字鎬 |
 | `pickaxe-upgrade` | `{ pickaxeId }` | 強化一級 |
 | `craft` | `{ recipeId, times }` | 製作（GBS §11） |
@@ -548,7 +575,7 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | 模組 | 案例 |
 |---|---|
 | fixed | 所有十字鎬 × 等級的 `power10` 都能整除；鑽石 Lv3 的 power10 = 360 ≥ 360 |
-| stats | GBS §10.4 的數值表全部相符；套組加成相加規則 |
+| stats | GBS §10 的數值表全部相符；套組加成相加規則 |
 | mining | `blockMs` 與 GBS §5 表格相符；換裝後工作量保留；Power 不足時停止 |
 | drop | 每一層的分布總和 = 1,000,000 ppm；Luck 只放大 Rare / Epic / Legendary |
 | drop | Luck 0.12 時：zone1 Rare = 28,000 ppm；寶物 Legendary = `Chance × 0.1 × 1.12` |
@@ -561,6 +588,12 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | settle | 遇到門檻停止且保留成果；遇到未解鎖礦區停止 |
 | settle | 有待領取報告時拒絕結算 |
 | collection | 出售後圖鑑紀錄保留；套組在持有時啟動、出售後失效、重新取得後啟動 |
+| rework | 只在前線卡關時可用；深度帶 = 最後挖完方塊所在帶往上第一個 Req ≤ Power 的帶；不改變 `frontierBlockIndex` |
+| rework | 金幣 ×0.5、寶物 ×0.5（暫定）；礦物表不變；前線解除卡關後不可再進入 |
+| first-treasure | 正常掉落第一件寶物 → `obtained`，之後永不發放 |
+| first-treasure | 有效時間達門檻且該方塊無寶物 → 發放固定 Epic、`granted`；不消耗亂數（保護前後的 golden 結果除了該件 Epic 外完全相同） |
+| first-treasure | 卡關、超過 12 小時上限、切換模式放棄的未完成方塊都不累積有效時間 |
+| first-treasure | 出售保護寶物後不會再次發放 |
 | actions | 每個動作的成功與各種失敗條件 |
 | market | 倍率永遠在 Min–Max 範圍內 |
 
@@ -577,9 +610,10 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 
 ### 14.4 平衡模擬
 
-- `scripts/balance-sim.ts` 已建立，是**開發輔助工具**，不是遊戲實作。目前內含 GBS v1.1 數值的副本與參考玩家策略。
-- 執行：`node scripts/balance-sim.ts [--runs 1000] [--seed 1] [--policy keep|sellDupes] [--hardness-scale 1.2] [--only profiles] [--json out.json]`（Node 22.18+ 可直接執行 TypeScript，不需安裝套件）。
-- 輸出：各玩家類型的完成時間（平均、中位數、P10、P90）、各礦區收入與時數、回訪 / 前線收益表、Mining Speed 驗證表、無保底風險指標。
+- `scripts/balance-sim.ts` 是**開發輔助工具**，不是遊戲實作。目前內含 GBS v1.2 數值的副本與參考玩家策略。
+- 執行與參數見檔案開頭說明與 GBS §23（Node 22.18+ 可直接執行 TypeScript，不需安裝套件）。可切換：首次保護門檻、回訪 / 重挖的金幣與寶物倍率、D13 前後的金幣表、是否啟用重挖、出售策略。
+- 輸出：玩家類型完成時間（平均、P10、P50、P90、P99）、裝備購買時間點、回訪 / 重挖 vs 前線收益表、Mining Speed 驗證、首次保護 A / B / C、主線後補齊收藏、防卡死壓力測試、D12–D16 前後比較。
+- 模擬器與正式引擎的已知差異列在 GBS §23.2。
 - 引擎完成後，腳本改為匯入 `packages/game-data` 與 `packages/game-engine`，刪除內含的資料副本，避免兩份規則不同步。
 - 結果必須符合 GBS §18 的標準，納入 CI。
 
@@ -594,6 +628,10 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | Client 修改本機時間 | 收益不變（伺服器不接受 Client 時間） |
 | 離線 11 小時 / 12 小時 / 16 小時 | 收益分別對應 11 / 12 / 12 小時 |
 | 每 6 小時領取 vs 每 12 小時領取（總時間相同、沒有卡關） | 期望收益相同（D9） |
+| 首次保護：同一份離線報告重送領取 / 重登入 / 同時兩個結算請求 | 保護寶物只發放一次 |
+| 首次保護：Client 修改本機時間、長時間卡關空等 | 有效時間不增加 |
+| 重挖：Client 指定 `reworkBand` | 忽略，由伺服器計算 |
+| 防卡死：金幣 0、背包全空的帳號在每個門檻 | 都能透過重挖或回訪恢復（對應 GBS §21） |
 | RLS | `authenticated` 無法寫入任何遊戲資料表、無法讀取他人資料、無法讀取 `private` |
 
 整合測試需要能注入伺服器時間：僅在測試環境中，RPC 接受 `p_now_override` 參數；正式環境禁用。【提案 T12】
@@ -655,3 +693,5 @@ GDD 只列 Vitest。是否加入 Playwright 做 E2E 測試，待確認。【提�
 | T12 | 測試環境可注入伺服器時間 |
 | T13 | 是否加入 Playwright E2E |
 | — | 是否需要訪客模式（C-4）。本規格假設**必須登入**，因為伺服器權威需要身分 |
+| — | 首次保護門檻 `PROTECT_MS`（D17，建議 4 小時） |
+| — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次），所以不能靠重建角色重複取得；多帳號不在 MVP 防範範圍內 |
