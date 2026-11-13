@@ -57,13 +57,16 @@ docker compose run --rm dev pnpm supabase:start        # 4. 啟動 Supabase Loca
 docker compose run --rm dev pnpm env:sync              # 5. 產生 apps/web/.env.local
 docker compose up -d web                               # 6. 啟動 Next.js（Hot Reload）
 docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Functions / Postgres 連線
+docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 ```
 
-全部成功時，第 7 步會顯示四個 ✅。
+全部成功時，第 7 步顯示五個 ✅、第 8 步顯示兩個 ✅。驗收項目與目前狀態見 [`docs/PHASE1_ACCEPTANCE.md`](docs/PHASE1_ACCEPTANCE.md)。
+
+> `web` 會加入 `supabase start` 建立的 Docker 網路，所以一定要先啟動 Supabase（第 4 步）再啟動 web（第 6 步）。
 
 | 服務 | 網址 |
 |---|---|
-| Web | http://127.0.0.1:3000（顯示 Phase 1 環境檢查） |
+| Web | http://127.0.0.1:3000（`next dev` 時顯示本地環境診斷） |
 | Supabase API | http://127.0.0.1:54321 |
 | Supabase Studio | http://127.0.0.1:54323 |
 | Postgres | `postgresql://postgres:postgres@127.0.0.1:54322/postgres` |
@@ -80,6 +83,8 @@ docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Fu
 | `dev pnpm supabase:status` | 查看 Supabase 網址與本地金鑰 |
 | `dev pnpm db:reset` | 重建本地資料庫並重新套用 migrations（**會清除本地資料**） |
 | `dev pnpm verify:env` | 連線驗證 |
+| `dev pnpm verify:hot-reload` | Hot Reload 驗證（暫時改寫 `packages/game-engine/src/dev-marker.ts`，結束後還原） |
+| `dev pnpm diagnose` | 收集 Docker / Supabase 狀態（金鑰會遮蔽），回報問題時使用 |
 | `dev pnpm check` | typecheck + test + build |
 | `dev pnpm sim` | 平衡模擬（參數見 `scripts/balance-sim.ts` 開頭） |
 | `dev bash` | 進入開發容器 |
@@ -106,7 +111,8 @@ docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Fu
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | `http://127.0.0.1:54321`（`pnpm env:sync` 產生） | `https://<project-ref>.supabase.co`（Vercel 設定） |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 本地金鑰（`pnpm env:sync` 產生） | Supabase Cloud 的 publishable / anon key（Vercel 設定） |
-| `SUPABASE_INTERNAL_URL` | `http://host.docker.internal:54321`（容器內的 Next.js 伺服器端使用） | **不設定**（自動改用 `NEXT_PUBLIC_SUPABASE_URL`） |
+| `SUPABASE_INTERNAL_URL` | `http://supabase_kong_mining-expedition:8000`（web 容器經 Supabase 的 Docker 網路使用） | **不設定**（自動改用 `NEXT_PUBLIC_SUPABASE_URL`） |
+| `EDGE_DIAGNOSTICS`（Edge Functions） | `supabase/config.toml` 的 `[edge_runtime.secrets]` 設為 `true` | **不設定**（健康檢查只回傳 `{"ok": boolean}`） |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`（Edge Functions） | CLI 自動注入 | Supabase Cloud 自動注入 |
 | 自訂 secret（Edge Functions） | `supabase/functions/.env` | `supabase secrets set` |
 
@@ -121,9 +127,20 @@ docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Fu
 | Docker socket | Supabase CLI 需要 Docker 才能啟動本地服務，所以 `dev` 與 `functions` 會掛載 `/var/run/docker.sock`。**這等同把宿主 Docker 的完整權限交給容器**：只在這兩個服務使用，不要在容器內執行來源不明的程式碼。`web` 不掛載 socket |
 | 非 root 執行 | 入口腳本把容器內的 `node` 使用者對應到 repo 擁有者的 UID / GID，再以 `node` 執行指令。socket 屬於 root 時（Docker Desktop 常見），改用只有 `node` 可存取的代理 socket |
 | 相同路徑掛載 | Repo 以宿主上的絕對路徑掛載到容器內。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
-| 網路 | `dev`、`functions` 使用 host network，讓 Supabase CLI 以 `127.0.0.1` 連到它啟動的服務；`web` 在 compose 網路，經由 `host.docker.internal` 存取 Supabase |
+| 網路 | `dev`、`functions` 使用 host network，讓 Supabase CLI 以 `127.0.0.1` 連到它啟動的服務；`web` 加入 Supabase 的 Docker 網路，直接連 API gateway 容器 |
 | 對外埠 | `web` 只綁定 `127.0.0.1:3000`。Supabase CLI 發布的埠由 CLI 決定 |
 | 與正式部署的關係 | `Dockerfile.dev`、`compose.yaml`、`docker/` 只用於本地；Vercel 與 Supabase Cloud 都不會讀取 |
+
+### 健康檢查與診斷
+
+| 端點 | 本地（`next dev`） | 正式（Vercel production / preview） |
+|---|---|---|
+| `GET /api/health` | `{"ok": true}` / 503 `{"ok": false}` | 相同；失敗原因只寫入伺服器日誌 |
+| `GET /api/dev/diagnostics`、`/` 的診斷表 | 引擎版本、延遲、錯誤細節 | 404 / 只顯示「開發中」 |
+| `GET /functions/v1/health` | 加上引擎資訊與資料庫細節（`EDGE_DIAGNOSTICS=true`） | 只回傳 `{"ok": boolean}` |
+
+- 所有健康檢查都只使用 anon key 呼叫 `health_ping`（回傳固定的 `{"pong": true}`），不使用 service role，也不回傳 PostgreSQL 版本。
+- 診斷只依 `NODE_ENV === "development"` 開啟，沒有可在正式環境打開的開關。
 
 ### 疑難排解
 
@@ -133,6 +150,8 @@ docker compose run --rm dev pnpm verify:env            # 7. 驗證 Web / Edge Fu
 | `supabase start` 出現 `permission denied ... docker.sock` | `docker compose run --rm dev docker info` 確認容器能存取 Docker；回報輸出 |
 | `supabase start` 等待健康檢查逾時 | 確認 Docker Desktop 支援 host network（Settings → Resources → Network → Enable host networking），或回報日誌 |
 | `web` 連不到 Supabase | 重新執行 `dev pnpm env:sync`，再 `docker compose restart web` |
+| `docker compose up -d web` 出現 `network supabase_network_mining-expedition declared as external, but could not be found` | 先執行 `dev pnpm supabase:start` |
+| 任何驗證失敗 | 執行 `dev pnpm diagnose`，把輸出與 `verify:env` / `verify:hot-reload` 的結果一起回報 |
 | 埠已被占用（3000 / 54321–54324） | 在 `.env` 改 `WEB_PORT`；Supabase 的埠在 `supabase/config.toml` |
 | 想完全重來 | `dev supabase stop --no-backup && docker compose down -v` |
 
@@ -148,6 +167,16 @@ dev pnpm check       # 以上三項
 ```
 
 `pnpm build` 不需要 Supabase 或 Docker 網路，也可以在任何有 Node 22 與 pnpm 的環境（例如 CI、Vercel）執行。
+
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 在每個 PR 與 `main` 的 push 執行：
+
+| Job | 內容 |
+|---|---|
+| install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → `pnpm build`（Node 22，不使用 Docker） |
+| deno check (Edge Functions) | 以 Deno 型別檢查 Edge Function（含匯入 `packages/`） |
+| docker integration (Linux) | 依上方「第一次啟動」步驟，在 Linux runner 以開發容器啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`、`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
 
 ---
 

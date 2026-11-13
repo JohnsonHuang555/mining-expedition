@@ -17,7 +17,8 @@ const projectId = /^project_id\s*=\s*"([^"]+)"/m.exec(readFileSync(resolve(root,
 function redact(text: string): string {
   return text
     .replace(/eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "<jwt>")
-    .replace(/sb_(publishable|secret)_[A-Za-z0-9_-]+/g, "sb_$1_<redacted>");
+    .replace(/sb_(publishable|secret)_[A-Za-z0-9_-]+/g, "sb_$1_<redacted>")
+    .replace(/\b[0-9a-f]{32,}\b/g, "<redacted-hex>");
 }
 
 function run(title: string, cmd: string, args: string[]): void {
@@ -50,8 +51,11 @@ run("Supabase 容器", "docker", ["ps", "--filter", `name=supabase_`, "--format"
 run("Supabase 網路", "docker", ["network", "inspect", `supabase_network_${projectId}`, "--format", "{{range $k, $v := .Containers}}{{$v.Name}} {{end}}"]);
 run("Edge Runtime 掛載（需要包含 packages/ 或整個 repo）", "docker", ["inspect", `supabase_edge_runtime_${projectId}`, "--format", "{{range .Mounts}}{{.Source}} -> {{.Destination}}\n{{end}}"]);
 run("Edge Runtime 最近日誌", "docker", ["logs", "--tail", "40", `supabase_edge_runtime_${projectId}`]);
-run("web 容器", "docker", ["compose", "ps", "web"]);
-run("web 最近日誌", "docker", ["compose", "logs", "--tail", "40", "web"]);
+// dev 容器內沒有 compose plugin，改用 compose 的標籤找 web 容器
+const webFilter = ["--filter", "label=com.docker.compose.project=mining-expedition", "--filter", "label=com.docker.compose.service=web"];
+run("web 容器", "docker", ["ps", "-a", ...webFilter, "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"]);
+run("web 最近日誌", "sh", ["-c", `docker logs --tail 40 $(docker ps -aq ${webFilter.join(" ")} | head -1) 2>&1`]);
+run("對外綁定的埠（0.0.0.0 代表區網可連線）", "docker", ["ps", "--format", "{{.Names}}\t{{.Ports}}"]);
 
 await probe("宿主埠：Supabase API（dev 容器在 host network）", "http://127.0.0.1:54321/rest/v1/");
 await probe("宿主埠：Web", `http://127.0.0.1:${process.env.WEB_PORT ?? "3000"}/api/health`);

@@ -27,8 +27,8 @@ additional_redirect_urls = ["http://localhost:3000"]
 
 [edge_runtime]
 enabled = true
-# per_worker：檔案變更時自動重新載入（本地開發用）
-policy = "per_worker"
+# oneshot：每個請求都重新載入函式（Hot Reload，本地開發用）；per_worker 用於負載測試
+policy = "oneshot"
 
 # 只用於本地 Edge Runtime；Supabase Cloud 不讀取這一段
 [edge_runtime.secrets]
