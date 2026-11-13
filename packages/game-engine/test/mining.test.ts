@@ -41,10 +41,27 @@ describe("Power 門檻（GBS §4.2；D5、P6）", () => {
 describe("回訪（GBS §2.3；D8、D15）", () => {
   it("只能回訪已解鎖、且比前線所在礦區淺的礦區；主線完成後全部可回訪", () => {
     expect(revisitableZones(500, 0)).toEqual([]);
-    expect(revisitableZones(1000, 0)).toEqual([0]); // 到達 zone1 底部，zone2 未解鎖：zone1 屬於比前線礦區（zone2）淺
     expect(revisitableZones(1500, 1)).toEqual([0]);
     expect(revisitableZones(2500, 2)).toEqual([0, 1]);
     expect(revisitableZones(3000, 2)).toEqual([0, 1, 2]);
+  });
+
+  it("礦區邊界（GBS §2.3.1）：前線所在礦區 = 下一個前線方塊所在的礦區，未解鎖也一樣", () => {
+    const cases: [number, 0 | 1 | 2, number[]][] = [
+      [999, 0, []],
+      [1000, 0, [0]], // 到達 100m、zone2 未解鎖：可回訪 zone1
+      [1000, 1, [0]],
+      [1999, 1, [0]],
+      [2000, 1, [0, 1]], // 到達 200m、zone3 未解鎖：可回訪 zone1、zone2
+      [2000, 2, [0, 1]],
+      [3000, 2, [0, 1, 2]],
+    ];
+    for (const [frontier, unlocked, zones] of cases) expect(revisitableZones(frontier, unlocked)).toEqual(zones);
+    // 卡在解鎖費時，重挖也同時可用
+    expect(frontierBlock(1000, 0, 50)).toBe("locked");
+    expect(reworkBand(1000, 0, 50)).toBe(9);
+    expect(frontierBlock(2000, 1, 180)).toBe("locked");
+    expect(reworkBand(2000, 1, 180)).toBe(19);
   });
 
   it("位置固定在礦區最深帶", () => {
