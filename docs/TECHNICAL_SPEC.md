@@ -732,7 +732,7 @@ flowchart LR
     end
     DEV -- docker.sock --> SB
     FN -- docker.sock --> ER
-    WEB -- host.docker.internal:54321 --> KONG
+    WEB -- supabase_network（kong:8000） --> KONG
     KONG --> ER
     KONG --> PG
     ER --> PG
@@ -745,8 +745,8 @@ flowchart LR
 | 開發容器 | `Dockerfile.dev`：Node 22、pnpm（corepack）、Supabase CLI v2.122.1、Docker CLI |
 | Docker 存取 | Docker-outside-of-Docker：掛載 `/var/run/docker.sock`，Supabase CLI 在宿主的 Docker 上建立容器 |
 | 路徑 | Repo 以**與宿主相同的絕對路徑**掛載到容器（`${PROJECT_ROOT}:${PROJECT_ROOT}`）。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
-| 容器間網路 | `web`、`functions` 透過 `host.docker.internal` 存取 Supabase 發布到宿主的埠（Linux 以 `host-gateway` 對應）；瀏覽器使用 `127.0.0.1` |
-| Hot Reload | `web`：Next.js dev server 監看 bind mount（必要時設 `WATCHPACK_POLLING=true`）；`functions`：`supabase functions serve` 監看檔案變更 |
+| 容器間網路 | `web` 加入 Supabase CLI 建立的 `supabase_network_<project_id>`，以 `http://supabase_kong_<project_id>:8000` 存取 API gateway；`dev`、`functions` 使用 host network；瀏覽器使用 `127.0.0.1` |
+| Hot Reload | `web`：Next.js dev server 監看 bind mount（必要時設 `WATCHPACK_POLLING=true`）；Edge Runtime：`[edge_runtime] policy = "oneshot"`，每個請求重新載入。CLI 把被匯入的 `packages/` 檔案逐一掛載，**新增檔案後需重新 `supabase start`**（見 `docs/PHASE1_ACCEPTANCE.md`） |
 | 環境變數 | `.env`（compose 用，由 `.env.example` 複製）；`apps/web/.env.local` 由 `pnpm env:sync` 從 `supabase status` 產生；兩者都不進版控 |
 | 資料持久化 | Postgres 資料在 Supabase CLI 建立的 Docker volume；`supabase stop` 保留資料，`supabase stop --no-backup` 才刪除。pnpm store 在 named volume |
 | 連線驗證 | `pnpm verify:env`：Web → Edge Function → Postgres、Web → PostgREST → Postgres |
@@ -758,7 +758,7 @@ flowchart LR
 |---|---|
 | Docker socket 等同宿主的 root 權限 | 只掛載到需要的服務（`dev`、`functions`）；`web` 不掛載；不在容器內執行來源不明的程式碼 |
 | 容器內以 root 執行 | 入口腳本偵測 socket 的群組 ID，把 `node` 使用者加入該群組後以 `node` 執行 |
-| 埠暴露到區網 | compose 發布的埠綁定 `127.0.0.1`；Supabase CLI 發布的埠需在實測時確認綁定位址 |
+| 埠暴露到區網 | compose 發布的 `web` 埠綁定 `127.0.0.1`。**Supabase CLI 發布的埠綁定 `0.0.0.0`**（CI 實測），區網可連到本地 Supabase：在不信任的網路請啟用防火牆或停止 Supabase |
 | 本地金鑰 | Supabase 本地金鑰只用於開發；`.env`、`.env.local` 列在 `.gitignore`；正式金鑰只存在 Vercel / Supabase secrets |
 | 版本漂移 | Supabase CLI、pnpm、Docker CLI 版本固定在 `Dockerfile.dev` 的 build args |
 
@@ -803,7 +803,7 @@ flowchart LR
 | T12 | 測試環境可注入伺服器時間 |
 | T13 | 是否加入 Playwright E2E |
 | T14 | Supabase CLI 是否升級到 v3（目前固定 v2.122.1，§15.1） |
-| T15 | Edge Function 匯入 `packages/` 在本地 `functions serve` 是否可行（§3.4，Phase 1 實測） |
+| T15 | Edge Function 匯入 `packages/`：Linux（CI）上 `supabase start` 已確認可行；Docker Desktop 待驗證（`docs/PHASE1_ACCEPTANCE.md`） |
 | — | 是否需要訪客模式（C-4）。本規格假設**必須登入**，因為伺服器權威需要身分 |
 | — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次）；多帳號不在 MVP 防範範圍內 |
 

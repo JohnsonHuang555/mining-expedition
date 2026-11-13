@@ -93,7 +93,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 ### Hot Reload
 
 - **Web**：`apps/web`、`packages/*` 的變更會自動重新載入。若偵測不到檔案變更，在 `.env` 設 `WATCHPACK_POLLING=true` 後 `docker compose up -d web`。
-- **Edge Functions**：`supabase start` 會以 `per_worker` 模式提供 `supabase/functions` 下的函式。需要即時重新載入或除錯時，使用 `functions` profile。
+- **Edge Functions**：`supabase start` 以 `oneshot` 模式提供函式，每個請求都會重新載入，包含 `packages/` 的變更。**在 `packages/` 新增檔案或新的匯入後，要 `dev pnpm supabase:stop && dev pnpm supabase:start`**（CLI 只掛載啟動當下被匯入的檔案）。
 
 ### 資料持久化
 
@@ -128,7 +128,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | 非 root 執行 | 入口腳本把容器內的 `node` 使用者對應到 repo 擁有者的 UID / GID，再以 `node` 執行指令。socket 屬於 root 時（Docker Desktop 常見），改用只有 `node` 可存取的代理 socket |
 | 相同路徑掛載 | Repo 以宿主上的絕對路徑掛載到容器內。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
 | 網路 | `dev`、`functions` 使用 host network，讓 Supabase CLI 以 `127.0.0.1` 連到它啟動的服務；`web` 加入 Supabase 的 Docker 網路，直接連 API gateway 容器 |
-| 對外埠 | `web` 只綁定 `127.0.0.1:3000`。Supabase CLI 發布的埠由 CLI 決定 |
+| 對外埠 | `web` 只綁定 `127.0.0.1:3000`。**Supabase CLI 發布的埠綁定 `0.0.0.0`**，同一網路的裝置可以連到本地 Supabase；在不信任的網路請啟用防火牆，或不用時 `supabase:stop` |
 | 與正式部署的關係 | `Dockerfile.dev`、`compose.yaml`、`docker/` 只用於本地；Vercel 與 Supabase Cloud 都不會讀取 |
 
 ### 健康檢查與診斷
