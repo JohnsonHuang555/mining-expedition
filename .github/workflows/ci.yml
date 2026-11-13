@@ -28,6 +28,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Engine coverage (T11：lines ≥ 90%)
+        run: pnpm --filter @mining/game-engine coverage
       - name: Engine determinism (Node vs fixture)
         run: node packages/game-engine/test/golden-cli.ts | diff -u packages/game-engine/test/fixtures/golden-v1.json -
       - name: Balance simulator smoke run (shared engine)
