@@ -1,4 +1,5 @@
-import { runHealthChecks, type CheckResult } from "@/lib/health";
+import { runDiagnostics, type CheckResult } from "@/lib/diagnostics";
+import { diagnosticsEnabled } from "@/lib/diagnostics-flag";
 
 export const dynamic = "force-dynamic";
 
@@ -17,13 +18,22 @@ function Row({ name, result }: { name: string; result: CheckResult }) {
 }
 
 export default async function Home() {
-  const report = await runHealthChecks();
+  if (!diagnosticsEnabled()) {
+    return (
+      <main>
+        <h1>挖礦探險隊</h1>
+        <p>開發中。</p>
+      </main>
+    );
+  }
+
+  const report = await runDiagnostics();
   return (
     <main>
-      <h1>挖礦探險隊 — Phase 1 環境檢查</h1>
+      <h1>挖礦探險隊 — 本地環境診斷</h1>
       <p>
         引擎 v{report.web.engine.engineVersion}・DATA_VERSION {report.web.engine.dataVersion}・RNG_VERSION{" "}
-        {report.web.engine.rngVersion}
+        {report.web.engine.rngVersion}・DEV_MARKER {report.web.devMarker}
       </p>
       {!report.env.ok && <p>缺少環境變數：{report.env.missing?.join("、")}（執行 <code>pnpm env:sync</code>）</p>}
       <table cellPadding={6} style={{ borderCollapse: "collapse" }}>
@@ -41,7 +51,7 @@ export default async function Home() {
           <Row name="Web → PostgREST → Postgres" result={report.postgrest} />
         </tbody>
       </table>
-      <p>檢查時間：{report.checkedAt}</p>
+      <p>檢查時間：{report.checkedAt}（只在 next dev 顯示；正式環境不提供此頁內容）</p>
     </main>
   );
 }

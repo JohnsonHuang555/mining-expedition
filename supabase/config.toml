@@ -30,6 +30,10 @@ enabled = true
 # per_worker：檔案變更時自動重新載入（本地開發用）
 policy = "per_worker"
 
-# Phase 1 連線檢查用，不需要登入
+# 只用於本地 Edge Runtime；Supabase Cloud 不讀取這一段
+[edge_runtime.secrets]
+EDGE_DIAGNOSTICS = "true"
+
+# 健康檢查：不需要登入。正式環境只回傳 {"ok": boolean}
 [functions.health]
 verify_jwt = false

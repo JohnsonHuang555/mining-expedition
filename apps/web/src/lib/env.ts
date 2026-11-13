@@ -5,7 +5,7 @@
  * |---|---|---|
  * | NEXT_PUBLIC_SUPABASE_URL | http://127.0.0.1:54321（瀏覽器用） | https://<ref>.supabase.co |
  * | NEXT_PUBLIC_SUPABASE_ANON_KEY | `pnpm env:sync` 從 supabase status 產生 | Supabase Cloud 的 publishable / anon key |
- * | SUPABASE_INTERNAL_URL | http://host.docker.internal:54321（容器內的伺服器端用） | 不設定，改用 NEXT_PUBLIC_SUPABASE_URL |
+ * | SUPABASE_INTERNAL_URL | http://supabase_kong_mining-expedition:8000（web 容器經 Supabase 的 Docker 網路） | 不設定，改用 NEXT_PUBLIC_SUPABASE_URL |
  */
 
 export interface SupabaseEnv {

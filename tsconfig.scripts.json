@@ -1,9 +1,18 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "noUncheckedIndexedAccess": false,
-    "erasableSyntaxOnly": true
+    "erasableSyntaxOnly": true,
+    "module": "ESNext",
+    "target": "ES2022"
   },
-  "include": ["scripts/env-sync.ts", "scripts/verify-env.ts"]
+  "include": [
+    "scripts/env-sync.ts",
+    "scripts/verify-env.ts",
+    "scripts/verify-hot-reload.ts",
+    "scripts/diagnose.ts"
+  ]
 }

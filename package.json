@@ -18,6 +18,8 @@
     "db:reset": "supabase db reset",
     "env:sync": "node scripts/env-sync.ts",
     "verify:env": "node scripts/verify-env.ts",
+    "verify:hot-reload": "node scripts/verify-hot-reload.ts",
+    "diagnose": "node scripts/diagnose.ts",
     "sim": "node scripts/balance-sim.ts"
   },
   "devDependencies": {

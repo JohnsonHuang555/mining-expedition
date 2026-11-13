@@ -7,7 +7,8 @@
 
 import { DATA_VERSION, RNG_VERSION } from "@mining/game-data";
 
-export { blockMs, canMine } from "./fixed.ts";
+export { MAX_HARDNESS, WORK_SCALE, blockMs, canMine } from "./fixed.ts";
+export { DEV_MARKER } from "./dev-marker.ts";
 
 export const ENGINE_VERSION = "0.1.0";
 

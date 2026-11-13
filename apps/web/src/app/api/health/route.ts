@@ -1,8 +1,9 @@
-import { runHealthChecks } from "@/lib/health";
+import { checkHealth } from "@/lib/health";
 
 export const dynamic = "force-dynamic";
 
+/** 正式環境健康檢查：只回傳 {"ok": boolean}（200 / 503） */
 export async function GET() {
-  const report = await runHealthChecks();
-  return Response.json(report, { status: report.ok ? 200 : 503 });
+  const ok = await checkHealth();
+  return Response.json({ ok }, { status: ok ? 200 : 503, headers: { "Cache-Control": "no-store" } });
 }
