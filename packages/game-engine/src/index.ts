@@ -10,7 +10,7 @@ export { MAX_HARDNESS, WORK_SCALE, blockMs, canMine, mulDivFloor } from "./fixed
 export { type RandomSource, SequenceSource, uniformInt } from "./rng/random-source.ts";
 export { SFC32_WARMUP, Sfc32 } from "./rng/sfc32.ts";
 export { createHmacSha256, hmacSha256, sha256 } from "./rng/sha256.ts";
-export { blockMessage, createBlockRng, seedWords } from "./rng/block-rng.ts";
+export { RNG_SECRET_BYTES, blockMessage, createBlockRng, seedWords } from "./rng/block-rng.ts";
 export { type HeldArtifacts, type Stats, activeSets, computeStats, isArtifactId, pickaxeDef } from "./stats.ts";
 export {
   type FrontierBlock,
