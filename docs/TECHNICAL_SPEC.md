@@ -1,6 +1,6 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.4（MVP v1.0 基準）**
+**Version 1.5（MVP v1.0 基準）**
 
 | 版本 | 變更 |
 |---|---|
@@ -9,10 +9,11 @@
 | v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
+| v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark。**遊戲規則、數值與 RNG_VERSION 不變** |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3.1、已確認決策 D1–D22 |
+| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3.2、已確認決策 D1–D22 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -282,65 +283,77 @@ digest = HMAC-SHA256( key = MARKET_SECRET, msg = "market:" + date + ":" + artifa
 
 ## 7. 結算演算法
 
+實作：`packages/game-engine/src/settle.ts`、`actions.ts`、`request.ts`。全部是純函式：不讀時鐘、不連資料庫、不修改傳入的狀態；相同的（狀態, serverNow, 亂數）永遠得到相同結果。
+
 ### 7.1 引擎函式
 
 ```ts
-settle(input: {
-  state: PlayerGameState;      // 從資料庫載入的快照
-  serverNow: number;           // Postgres now()，毫秒
-  rngFactory: (digCounter: number) => RandomSource;
-  data: GameData;
-}): SettleResult;
+// 結算到 serverNow（TECHNICAL_SPEC §7.2）
+settle(state: PlayerGameState, ctx: {
+  serverNow: number;                                   // Postgres now()，毫秒；唯一時間來源
+  rng: (digCounter: number) => RandomSource;           // createBlockRng(rngSecret)；密鑰只在伺服器
+  options?: SettleOptions;                             // 只供平衡模擬比較方案；正式結算不傳
+}): { ok: true; state; changed; summary; events; report; blocks } | { ok: false; error };
+
+// 套用一個玩家操作；state 必須已結算到現在
+applyAction(state, action: GameAction, ctx: { marketMultiplierPpm? }): { ok: true; state; changed; events } | { ok: false; error };
+
+// Edge Function 的唯一入口：先結算再操作，回傳 CAS 提交計畫
+executeRequest(state, { requestId, command }, ctx): RequestResult;
 ```
 
-`SettleResult` 包含新狀態、在線事件或離線報告草稿。
+`GameAction`：`purchase_pickaxe`、`equip_pickaxe`、`upgrade_pickaxe`、`craft`、`sell_items`、`sell_artifacts`、`unlock_zone`、`select_mining_mode`、`claim_report`。請求先經過 `parseAction` / `parseCommand`：只接受已知欄位與合法範圍，多餘欄位（例如成本、價格、深度）一律 `INVALID_REQUEST`。
+
+靜態資料以模組匯入（`@mining/game-data`，綁定 `DATA_VERSION`），不以參數傳入。
 
 ### 7.2 流程
 
 ```
-elapsed = serverNow − state.lastSettledAt
+settle(state, serverNow):
+  驗證狀態（validateState）、rngVersion、dataVersion ≤ 引擎版本
+  if serverNow < lastSettledAt          → INVALID_TIME
+  if pendingOfflineReport 存在          → REPORT_PENDING（等待領取的時間在領取後才結算，GBS §7.7）
+  elapsed = serverNow − lastSettledAt
+  elapsed = 0                           → noop
+  elapsed > 300,000（P28）              → 離線：simMs = min(elapsed, 12h)（D9），獎勵進報告
+  否則                                   → 在線：simMs = elapsed，獎勵直接入帳
 
-if state.pendingReportId 存在 → 回傳錯誤 REPORT_PENDING（GBS §15）
-if elapsed > 300,000 ms     → mode = offline，simMs = min(elapsed, 12h)   // D9
-else                        → mode = online， simMs = elapsed
+  t = 0
+  while t < simMs:
+      位置 = miningPosition(state)        // 前線：frontierBlock；回訪 / 重挖：該位置 RequiredPower
+      if 不能挖 → stopReason = blocked_power | blocked_unlock | frontier_complete；break
+      step = advanceWork(blockWork, hardness, rate, simMs − t)
+      t += step.usedMs；blockMs += step.usedMs
+      if 未完成 → 保留 blockWork / blockMs；break
+      完成方塊（GBS §4.3）：
+          drop = rollBlock(rng(digCounter), 位置, blockMs, luck)
+          ft   = firstTreasureStep(...)      // 不消耗亂數
+          寶物實例 ID = "d" + digCounter
+          在線：入帳；套組可能改變 → 下一個方塊重新計算數值
+          離線：加入報告；數值整段不變
+      digCounter += 1；blockWork = blockMs = 0；前線模式 frontierBlockIndex += 1
 
-t = 0
-while t < simMs and canMine(state):          // 前線：未卡關；回訪 / 重挖：Power ≥ 該位置 RequiredPower
-    spot      = 前線方塊 | 回訪礦區最深帶 | 重挖深度帶（GBS §2.2）
-    rate      = 依目前裝備與「目前持有」的套組計算
-    needWork  = Hardness × 10^7 − state.blockWork
-    needMs    = ceil(needWork / rate)
-    if t + needMs > simMs:
-        state.blockWork += rate × (simMs − t)
-        state.blockMs   += simMs − t
-        break
-    t += needMs
-    完成方塊（GBS §4.3）：亂數 = rngFactory(state.digCounter)；金幣與寶物倍率依模式（GBS §2.2）
-    首次保護（GBS §7.7）：
-        effectiveMiningMs += blockMs
-        if firstTreasure == "pending":
-            if 本方塊有寶物 → firstTreasure = "obtained"
-            elif effectiveMiningMs ≥ PROTECT_MS → 加入固定 Epic；firstTreasure = "granted"
-    state.digCounter += 1；state.blockWork = 0；state.blockMs = 0
-    if mode == online: 獎勵直接入帳（套組可能立即改變 rate）
-    else:              獎勵累加到報告草稿（不入帳，rate 不變）
-    只有前線模式推進 frontierBlockIndex；
-    前線：若 Power 不足 → status = "blocked_power"
-          若到礦區底部且下一礦區未解鎖 → status = "blocked_unlock"
-          若完成 blockIndex 2999 → status = "frontier_complete"
-    回訪 / 重挖：不改變 frontierBlockIndex 與 status，持續循環（離線也一樣）
+  lastSettledAt = serverNow              // 超過 12 小時的部分捨棄
+  離線 → pendingOfflineReport = { reportId: "r" + periodStart, ... }
+```
 
-state.lastSettledAt = serverNow          // 超過 12 小時的部分捨棄（D9）
+```
+executeRequest(state, { requestId, command }, ctx):
+  claim_report → 不結算，直接 applyAction
+  其他         → settle → （settle 指令到此為止）→ applyAction（失敗時操作沒有任何效果）
+  有變化       → commit = { state: stateVersion + 1, reportCreated, reportClaimed, actionApplied }
+  expectedStateVersion = 原 stateVersion（CAS 條件）
 ```
 
 ### 7.3 要點
 
-- **在線與離線共用同一段程式**，只差在獎勵入帳方式與 12 小時上限。
-- 不因領取頻率產生額外倍率：結算只依實際經過時間，沒有任何與呼叫次數相關的加成（D9）。
-- 方塊完成時記錄 `blockMs`（實際挖掘毫秒），作為觸發機率的輸入（GBS §7.1）。
-- 結算中途不會發生購買或強化，所以離線期間 rate 只在套組變化時改變；離線獎勵未入帳，所以 rate 在離線中不變。
-- 前線 `status` 為 blocked 且模式為前線時，結算只推進 `lastSettledAt`，沒有產出，也不累積有效挖掘時間。
-- 首次保護的狀態變更與報告（或在線入帳）在同一次 `commit_player_state` 交易中寫入；重送請求、重登入、重複領取都不會再次發放（§10.4）。
+- **在線與離線共用同一個迴圈**，只差在獎勵入帳方式與 12 小時上限。
+- 不因結算頻率產生額外倍率：結算只依實際經過時間（D9）。一次結算與切成多次在線結算的結果完全相同（測試）。
+- 第四層使用方塊的**實際**挖掘毫秒（跨越換裝備的累加值，P5）。
+- 前線卡關時結算只推進 `lastSettledAt`，沒有產出，也不累積有效挖掘時間。
+- 首次保護的狀態變更與報告（或在線入帳）在同一個提交中寫入（§10.6）。離線發放時 `firstTreasure.reportId` 指向該報告，領取時清除；`validateState` 檢查「狀態已更新 ⇒ 寶物在背包或在該報告中」。
+- 重挖深度帶依「目前 Power」計算：每個操作後重新確認；前線解除卡關時自動回到前線、深度帶改變時進度歸零（GBS §2.4）。
+- 挖掘狀態（mining / blocked_power / blocked_unlock / frontier_complete）是衍生值（`miningPosition`），不儲存。
 
 ---
 
@@ -348,62 +361,31 @@ state.lastSettledAt = serverNow          // 超過 12 小時的部分捨棄（D9
 
 ### 8.1 玩家狀態型別
 
-```ts
-interface PlayerGameState {
-  playerId: string;
-  version: number;               // 樂觀鎖
-  dataVersion: number;
+定義在 `packages/game-engine/src/state.ts`（`PlayerGameState`，`schemaVersion` 1）。只含可序列化的純資料，時間是伺服器毫秒整數，數量是 safe integer；**不含 rngSecret**，可以原樣回傳給玩家（`toPlayerView` 附上數值與挖掘狀態等衍生值）。
 
-  coins: number;                 // bigint
-  equippedPickaxe: PickaxeId;
-  pickaxes: Record<PickaxeId, { level: 1 | 2 | 3 | 4 | 5 }>;
-  unlockedZones: ZoneId[];
+| 欄位 | 內容 |
+|---|---|
+| `playerId`、`schemaVersion`、`stateVersion`、`dataVersion`、`rngVersion` | 身分與版本；`stateVersion` 是樂觀鎖，每次提交 +1 |
+| `createdAt`、`lastSettledAt` | 伺服器時間 |
+| `coins`、`inventory` | 金幣；可堆疊物品（只存正數） |
+| `equippedPickaxe`、`pickaxes` | 裝備中；已擁有（依序前綴）與等級 |
+| `unlockedZone` | 已解鎖的最深礦區（0–2） |
+| `mining` | `mode`、`revisitZone`、`reworkBand`、`frontierBlockIndex`、`digCounter`、`blockWork`、`blockMs` |
+| `heldArtifacts` | 持有中的寶物實例：`instanceId`（`d<digCounter>`）、`artifactId`、`obtainedAt`、`mode`、`band`、`frontierBlockIndex`、`digCounter`、`source`（`drop` / `first_treasure_protection`） |
+| `discoveredArtifacts` | 圖鑑：`firstDiscoveredAt`、`firstBand`、`totalFound`（永不刪除） |
+| `firstTreasure` | `status`、`effectiveMiningMs`、`resolvedAt`、`artifactInstanceId`、`reportId`（第一件寶物還在待領取報告中時） |
+| `pendingOfflineReport` | 待領取報告（完整內容，見下） |
+| `lastClaimedReportId` | 重複領取時回傳 `REPORT_ALREADY_CLAIMED` |
 
-  mining: {
-    mode: "frontier" | "revisit" | "rework";
-    zone: ZoneId;                // 回訪礦區
-    reworkBand: number | null;   // 重挖深度帶，由伺服器計算（GBS §2.4）
-    frontierBlockIndex: number;  // 0–3000；最大深度 = frontierBlockIndex / 10
-    digCounter: number;
-    blockWork: number;           // 目前方塊已累積的工作量
-    blockMs: number;             // 目前方塊已花費的毫秒
-    status: "mining" | "blocked_power" | "blocked_unlock" | "frontier_complete";
-    lastSettledAt: number;
-  };
+`OfflineReport`：`reportId`（`r<periodStart>`）、`periodStart`、`periodEnd`、`simulatedMs`、`discardedMs`、`minedMs`、`idleMs`、`blocksMined`、`mode`、`frontierFrom/To`、`digCounterFrom/To`、`stopReason`、`rewards { coins, items, artifacts[] }`（每件附 `isNewDiscovery`）、`firstTreasureGranted`。
 
-  inventory: Record<ItemId, number>;           // 可堆疊物品
-  artifacts: ArtifactInstance[];               // 目前持有的寶物實例
-  collection: Record<ArtifactId, CollectionRecord>;
-  pendingReportId: string | null;
+與 v1.4 草稿的差異：
 
-  firstTreasure: {               // GBS §7.7（D17）
-    status: "pending" | "obtained" | "granted";
-    effectiveMiningMs: number;   // 只累積已完成方塊的 blockMs
-    resolvedAt: number | null;
-    artifactInstanceId: string | null;  // 保護發放時的實例
-  };
-}
-
-interface ArtifactInstance {     // 取代 GDD §4.3 的 Artifact 介面
-  id: string;                    // uuid
-  artifactId: ArtifactId;        // 參照靜態定義（name、rarity、baseValue）
-  discoveredAt: number;
-  depthBlockIndex: number;
-}
-
-interface CollectionRecord {
-  artifactId: ArtifactId;
-  firstDiscoveredAt: number;
-  firstDepthBlockIndex: number;
-  totalFound: number;
-}
-```
-
-與 GDD §4.3 `Artifact` 介面的差異：
-
-- `name`、`rarity`、`baseValue` 移到靜態定義，以 `artifactId` 參照。
-- `currentValue` 不儲存，每次讀取時用 Base Value × 當日倍率計算。
-- `isCollected` 拿掉：「持有」由實例是否存在決定，「發現過」由 `CollectionRecord` 決定。
+- 寶物實例 ID 由方塊序號決定（`d<digCounter>`），不是 uuid：純函式不能產生亂數 ID，且同一個方塊重算得到同一個 ID（冪等）。資料表主鍵改為 `(player_id, instance_id)`。
+- `unlockedZones: ZoneId[]` → `unlockedZone: 0 | 1 | 2`（解鎖必須依序，兩者等價）。
+- `mining.status` 不儲存，由 `miningPosition` 計算。
+- `depthBlockIndex` → `band` + `frontierBlockIndex`（回訪 / 重挖沒有單一 blockIndex）。
+- `collection` → `discoveredArtifacts`；`pendingReportId` → `pendingOfflineReport`（完整報告）。
 
 ### 8.2 資料表（schema `public`，Client 唯讀）
 
@@ -552,6 +534,22 @@ sequenceDiagram
 
 ---
 
+### 10.6 冪等與原子提交 【Settlement & Actions Core】
+
+純函式不處理鎖或交易，但回傳的資料足以讓 Supabase Integration 階段實作：
+
+| 項目 | 定義 |
+|---|---|
+| 請求識別 | 每個改變狀態的請求帶 `requestId`（= `Idempotency-Key`，Client 產生 uuid，重試沿用）。`canonicalCommandJson(command)` 產生 `request_hash`；同一個 key 對應不同內容 → `IDEMPOTENCY_MISMATCH` |
+| stateVersion | 載入時的版本 = `expectedStateVersion`；提交時 `update … where version = expected`，成功後為 +1。不符 → `VERSION_CONFLICT`，從載入重新執行 `executeRequest`（最多 3 次） |
+| 不需要提交 | `commit = null`（沒有變化或請求無效）：不寫入，但仍寫入 `action_log` 讓重送得到相同回應 |
+| 報告識別 | `reportId = "r" + periodStart`；每位玩家唯一（`lastSettledAt` 只會遞增）。部分唯一索引保證最多一份 `pending` |
+| 報告建立 | `commit.reportCreated`：同一交易寫入 `offline_reports`（pending）、`pending_report_id`、挖掘狀態、首次保護狀態 |
+| 報告領取 | `commit.reportClaimed`：同一交易鎖定報告列，只有 `pending` 才改為 `claimed` 並寫入獎勵、清除 `pending_report_id` |
+| 必須原子提交 | 金幣、物品、寶物實例（新增 / 出售刪除）、圖鑑、十字鎬、礦區、挖掘狀態（含 `digCounter`、`lastSettledAt`）、首次保護、報告狀態、`action_log`、`version` |
+| 操作失敗 | 操作沒有任何效果；若結算有變化（例如剛產生報告）`commit.actionApplied = false`，結算結果仍提交 |
+| 寶物實例 | 主鍵 `(player_id, instance_id)`；`instance_id = "d" + digCounter`，同一方塊不會產生兩個實例 |
+
 ## 11. 安全
 
 | 項目 | 規則 |
@@ -683,6 +681,24 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | D18 門檻 | 有效時間 14,399,999 ms 不發放；≥ 14,400,000 ms 且該方塊無寶物時發放；該方塊有寶物則改為 `obtained` |
 | D20 報告 | 見 §14.5 |
 
+### 14.1.2 Settlement & Actions 測試對照
+
+| 規則 | 測試（`packages/game-engine/test/`） |
+|---|---|
+| 一次結算 = 分段在線結算（含套組變化、未完成方塊） | `settle.test.ts` |
+| P5 換裝備保留工作量 | `settle.test.ts` |
+| D5 Power 不足 / D10 未解鎖 / 主線完成：停止且沒有額外掉落 | `settle.test.ts` |
+| 回訪 / 重挖不增加最大深度 | `settle.test.ts` |
+| D9 12 小時上限、超過部分不再結算 | `settle.test.ts` |
+| P28 300,000 ms 在線、300,001 ms 離線 | `settle.test.ts` |
+| D17 / D18 首次保護：最多一次、不消耗亂數、離線發放與報告一致、出售後不再發放 | `settle.test.ts` |
+| D20 報告未領取時背包不可用、一般操作拒絕、重複領取不重複入帳 | `settle.test.ts`、`actions.test.ts`、`request.test.ts` |
+| P20 在線入帳後下一方塊套組生效、領取後套組生效、出售後失效（圖鑑保留） | `settle.test.ts`、`actions.test.ts` |
+| D10 / P21 / P22 購買、強化、製作、出售、解鎖：足夠 / 不足、不部分扣除、非法數量 | `actions.test.ts` |
+| D15 / D16 / P3 模式切換、重挖深度帶、自動回到前線 | `actions.test.ts` |
+| 狀態驗證、序列化、不含密鑰、cloneState 不共用物件 | `request.test.ts` |
+| stateVersion、提交計畫、操作失敗時的提交 | `request.test.ts` |
+
 ### 14.2 確定性測試
 
 - 固定 `rngSecret` + 固定狀態 + 固定時間 → 結果與快照（golden file）完全一致。
@@ -698,7 +714,7 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 
 ### 14.4 平衡模擬
 
-- `scripts/balance-sim.ts` 是**開發輔助工具**，不是遊戲實作。資料匯入 `@mining/game-data`，規則（數值聚合、門檻、工作量、四層掉落、逐方塊 HMAC 亂數、首次保護判定）匯入 `@mining/game-engine`；腳本只保留參考玩家策略、時間推進與報表。
+- `scripts/balance-sim.ts` 是**開發輔助工具**，不是遊戲實作。玩家狀態是正式的 `PlayerGameState`；時間推進用 `settle`（在線每次 ≤ 300 秒、離線在登入時一次結算並領取報告），購買 / 強化 / 製作 / 出售 / 解鎖 / 切換模式 / 領取都用 `applyAction`。腳本只保留參考玩家策略（何時做什麼）、登入排程、Monte Carlo 與報表。
 - 執行與參數見檔案開頭說明與 GBS §23（Node 22.18+，先 `pnpm install`）。可切換：首次保護門檻、回訪 / 重挖的金幣與寶物倍率、D13 前後的金幣表、是否啟用重挖、出售策略。非預設方案經由引擎的 `DropRules` 參數與 `firstTreasureStep` 的門檻參數傳入，正式結算一律使用預設值。
 - 輸出：玩家類型完成時間（平均、P10、P50、P90、P99）、裝備購買時間點、回訪 / 重挖 vs 前線收益表、Mining Speed 驗證、首次保護 A / B / C、主線後補齊收藏、防卡死壓力測試、D12–D16 前後比較。
 - 模擬器與正式引擎的已知差異列在 GBS §23.2。
@@ -728,6 +744,10 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 整合測試需要能注入伺服器時間：僅在測試環境中，RPC 接受 `p_now_override` 參數；正式環境禁用。【提案 T12】
 
 ### 14.6 效能基準
+
+12 小時離線結算最壞情境（`packages/game-engine/bench/settle-bench.ts`，Node 與 Deno 共用）：窮舉所有合法「位置 × 十字鎬 × 等級 × 套組」後，最多方塊的是「主線完成後回訪 zone1、鑽石 Lv5、三套套組」，12 小時 3,384 個方塊。數值見 PR #4；Edge Function 的實際 CPU / 記憶體在 Supabase Integration 階段量測。
+
+### 14.6.1 目標
 
 - 最壞情況（離線 12 小時、最快方塊）的 `settle` 在 Node 上 < 50ms。
 - 部署後在 Edge Function 上量測實際 CPU 時間。

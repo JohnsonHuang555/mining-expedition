@@ -8,7 +8,7 @@
 | v1.3 | 2026-11-13 | 決策 D11–D17；GDD / GBS / TECH 更新至 v1.2；模擬器重寫；首次保護、防卡死、收藏補齊模擬 |
 | v1.4 | 2026-11-13 | 決策 D18–D22；清除所有阻擋 MVP 的事項；GDD / GBS / TECH 更新至 v1.3；Phase 1 開始 |
 
-相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.1、`docs/TECHNICAL_SPEC.md` v1.4、`scripts/balance-sim.ts`
+相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.2、`docs/TECHNICAL_SPEC.md` v1.5、`scripts/balance-sim.ts`
 
 ---
 
