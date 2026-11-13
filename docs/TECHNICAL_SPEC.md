@@ -9,11 +9,11 @@
 | v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
-| v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark。**遊戲規則、數值與 RNG_VERSION 不變** |
+| v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3.2、已確認決策 D1–D22 |
+| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3.3、已確認決策 D1–D24 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -312,7 +312,7 @@ executeRequest(state, { requestId, command }, ctx): RequestResult;
 settle(state, serverNow):
   驗證狀態（validateState）、rngVersion、dataVersion ≤ 引擎版本
   if serverNow < lastSettledAt          → INVALID_TIME
-  if pendingOfflineReport 存在          → REPORT_PENDING（等待領取的時間在領取後才結算，GBS §7.7）
+  if pendingOfflineReport 存在          → REPORT_PENDING（待領取期間挖掘暫停，D24）
   elapsed = serverNow − lastSettledAt
   elapsed = 0                           → noop
   elapsed > 300,000（P28）              → 離線：simMs = min(elapsed, 12h)（D9），獎勵進報告
@@ -334,12 +334,16 @@ settle(state, serverNow):
       digCounter += 1；blockWork = blockMs = 0；前線模式 frontierBlockIndex += 1
 
   lastSettledAt = serverNow              // 超過 12 小時的部分捨棄
-  離線 → pendingOfflineReport = { reportId: "r" + periodStart, ... }
+  離線且完成至少 1 個方塊 → pendingOfflineReport = { reportId: "r" + periodStart, ... }
+  離線但沒有完成方塊      → 不建立報告，只推進時間（D23）
+
+applyAction(claim_report, serverNow):
+  入帳報告內容；lastSettledAt = serverNow     // D24：待領取期間暫停，等待時間不補算
 ```
 
 ```
 executeRequest(state, { requestId, command }, ctx):
-  claim_report → 不結算，直接 applyAction
+  claim_report → 不結算，直接 applyAction（領取時間成為新的結算基準，D24）
   其他         → settle → （settle 指令到此為止）→ applyAction（失敗時操作沒有任何效果）
   有變化       → commit = { state: stateVersion + 1, reportCreated, reportClaimed, actionApplied }
   expectedStateVersion = 原 stateVersion（CAS 條件）
@@ -354,6 +358,7 @@ executeRequest(state, { requestId, command }, ctx):
 - 首次保護的狀態變更與報告（或在線入帳）在同一個提交中寫入（§10.6）。離線發放時 `firstTreasure.reportId` 指向該報告，領取時清除；`validateState` 檢查「狀態已更新 ⇒ 寶物在背包或在該報告中」。
 - 重挖深度帶依「目前 Power」計算：每個操作後重新確認；前線解除卡關時自動回到前線、深度帶改變時進度歸零（GBS §2.4）。
 - 挖掘狀態（mining / blocked_power / blocked_unlock / frontier_complete）是衍生值（`miningPosition`），不儲存。
+- `validateState` 接受任何輸入（不可信的資料庫快照）：先檢查每一層的型別與結構，再檢查遊戲不變式；不會丟出例外。結構錯誤時 `settle` / `applyAction` / `executeRequest` 回傳 `INVALID_STATE`。
 
 ---
 
@@ -511,6 +516,8 @@ sequenceDiagram
 
 | 規則 | 實作 |
 |---|---|
+| 待領取期間 | 挖掘暫停；領取時以 `server_now` 為新的 `lastSettledAt`，等待的時間不補算，所以領取後不會再立刻產生另一份報告（D24） |
+| 空報告 | 離線期間沒有完成任何方塊時不建立報告（D23） |
 | 阻擋其他操作 | 所有改變狀態的 API（除了 `report-claim`）在 `pending_report_id` 不為空時回傳 `REPORT_PENDING`。`state-get`、`market-get` 等唯讀 API 照常可用 |
 | 原子領取 | `commit_player_state` 以 `select … for update` 鎖定報告列；只有 `status = 'pending'` 才寫入獎勵並改為 `claimed`，同一交易清除 `pending_report_id` |
 | 重送同一個 key | 回傳 `action_log` 中儲存的回應，不再入帳 |
@@ -692,6 +699,8 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | D9 12 小時上限、超過部分不再結算 | `settle.test.ts` |
 | P28 300,000 ms 在線、300,001 ms 離線 | `settle.test.ts` |
 | D17 / D18 首次保護：最多一次、不消耗亂數、離線發放與報告一致、出售後不再發放 | `settle.test.ts` |
+| D23 沒有完成方塊時不建立報告；D24 待領取期間暫停、領取時更新基準、不連續產生報告 | `settle.test.ts`、`request.test.ts` |
+| 不可信快照（缺欄位、null、錯型別）回傳 INVALID_STATE、不丟例外 | `request.test.ts` |
 | D20 報告未領取時背包不可用、一般操作拒絕、重複領取不重複入帳 | `settle.test.ts`、`actions.test.ts`、`request.test.ts` |
 | P20 在線入帳後下一方塊套組生效、領取後套組生效、出售後失效（圖鑑保留） | `settle.test.ts`、`actions.test.ts` |
 | D10 / P21 / P22 購買、強化、製作、出售、解鎖：足夠 / 不足、不部分扣除、非法數量 | `actions.test.ts` |

@@ -7,8 +7,9 @@
 | v1.2 | 2026-11-13 | 決策 D7–D10；GDD v1.1；`scripts/balance-sim.ts`；後期節奏 UI/UX 方案 |
 | v1.3 | 2026-11-13 | 決策 D11–D17；GDD / GBS / TECH 更新至 v1.2；模擬器重寫；首次保護、防卡死、收藏補齊模擬 |
 | v1.4 | 2026-11-13 | 決策 D18–D22；清除所有阻擋 MVP 的事項；GDD / GBS / TECH 更新至 v1.3；Phase 1 開始 |
+| v1.5 | 2026-11-14 | 決策 D23–D24（離線報告的建立與待領取期間，PR #4 review） |
 
-相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.2、`docs/TECHNICAL_SPEC.md` v1.5、`scripts/balance-sim.ts`
+相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.3、`docs/TECHNICAL_SPEC.md` v1.5、`scripts/balance-sim.ts`
 
 ---
 
@@ -38,10 +39,12 @@
 | **D20** | 未領取報告 | 阻擋其他操作；重複、多分頁、多裝置只入帳一次；網路或 API 失敗不會永久卡住 | GDD §7.3、GBS §15、TECH §10.5 |
 | **D21** | 後端架構 | Next.js + React + TS；pnpm workspace monorepo；共用純 TS 引擎；Supabase Postgres / Auth / Edge Functions；Edge Function 計算、Database Function 原子提交 | GDD §9、TECH §3 |
 | **D22** | Docker-first 開發環境 | 本機只需 Docker Desktop、Git、編輯器；Dockerfile.dev + compose.yaml；Supabase 由官方 CLI 管理；不改用 Self-hosting | GDD §9.3.1、TECH §15、README |
+| **D23** | 空的離線報告 | 離線期間沒有完成任何方塊時不建立報告，只推進時間並回報停止原因；完成至少 1 個方塊才建立待領取報告（PR #4 review） | GBS §15、TECH §7.2 |
+| **D24** | 待領取期間的時間 | 有待領取報告時挖掘暫停；領取時以伺服器時間為新的結算基準，等待的時間不產出、不累積有效挖掘時間、不補算，不會連續產生報告（PR #4 review） | GBS §7.7、§15、TECH §7.2、§10.5 |
 
 ---
 
-## 2. D11–D17 落地狀態（D18–D22 見 §1）
+## 2. D11–D17 落地狀態（D18–D24 見 §1）
 
 | 決策 | 已確認（寫入正式規則） | 暫定 | 待決 |
 |---|---|---|---|
