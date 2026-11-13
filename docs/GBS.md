@@ -713,7 +713,7 @@ zone3 沒有煤炭與鐵礦；S5 需要的強化石靠回訪 zone1 / zone2 取�
 
 ```bash
 pnpm install                                                 # 第一次：建立 workspace 連結（模擬器匯入 @mining/*）
-node scripts/balance-sim.ts                                  # 全部報表（約 10–15 分鐘；舊版約 4 分鐘，差距來自逐方塊 HMAC；預設 --protect 4）
+node scripts/balance-sim.ts                                  # 全部報表（單一程序約 40 分鐘 CPU；每個方塊都走正式的請求驗證與 HMAC。可用 --only 分段平行執行）
 node scripts/balance-sim.ts --only profiles --protect none   # §16
 node scripts/balance-sim.ts --only revisit                   # §14.3
 node scripts/balance-sim.ts --only speed                     # §7.6
@@ -774,6 +774,20 @@ node scripts/balance-sim.ts --only profiles                  # 套用 D18 的主
 
 - §7.6 的每小時寶物機會在新版小數第三位可能少 0.001（例如 0.354 → 0.353）：引擎以整數 ppm 無條件捨去，差距 < 0.01%，不影響任何結論。
 - 期望值的金幣改用實際抽取範圍 `[coinMin, coinMax]` 的平均（例如 Avg 75 → [38, 113]，平均 75.5），重挖 / 回訪收益表因此有 ±0.3% 的差異。
+
+### 23.4 改用正式狀態轉換前後比較（Settlement & Actions Core，1,000 次，seed 1）
+
+模擬器改為持有 `PlayerGameState`、以 `settle` / `applyAction` 推進後，與前一版（只共用掉落規則）的完整報表比較：
+
+| 段落 | 結果 |
+|---|---|
+| A 玩家類型（4 種 × 1,000 次） | **逐字相同** |
+| B 回訪 / 重挖收益 | **逐字相同** |
+| C Mining Speed 驗證 | **逐字相同** |
+| D 首次保護 A / B / C（4,000 次 × 3 方案） | **逐字相同** |
+| G D12–D16 前後比較（8 組 × 1,000 次） | **逐字相同** |
+| E 主線後補齊收藏 | 回訪期間每小時收入 1,439 → 1,436（−0.2%），其餘相同。前一版以浮點秒推進「每小時」的邊界，偶爾差 1 ms；現在全程為整數毫秒 |
+| F 防卡死壓力測試 | 恢復時間差 ≤ 0.3 小時、卡死比例不變。前一版直接把前線設在門檻但 `digCounter` 從 0 開始；正式狀態要求 `digCounter ≥ frontierBlockIndex`，所以亂數樣本不同 |
 
 ## 24. 數值版本管理 【決策 D19】
 
