@@ -88,6 +88,6 @@ describe("canMine（D19：P6，使用 ≥）", () => {
 
 describe("engineInfo", () => {
   it("讀得到 @mining/game-data 的版本號（驗證 workspace 匯入）", () => {
-    expect(engineInfo()).toEqual({ engineVersion: "0.2.0", dataVersion: 1, rngVersion: 1 });
+    expect(engineInfo()).toEqual({ engineVersion: "0.3.0", dataVersion: 1, rngVersion: 1 });
   });
 });
