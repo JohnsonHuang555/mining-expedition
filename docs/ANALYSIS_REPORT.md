@@ -8,7 +8,7 @@
 | v1.3 | 2026-11-13 | 決策 D11–D17；GDD / GBS / TECH 更新至 v1.2；模擬器重寫；首次保護、防卡死、收藏補齊模擬 |
 | v1.4 | 2026-11-13 | 決策 D18–D22；清除所有阻擋 MVP 的事項；GDD / GBS / TECH 更新至 v1.3；Phase 1 開始 |
 
-相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3、`docs/TECHNICAL_SPEC.md` v1.3、`scripts/balance-sim.ts`
+相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.1、`docs/TECHNICAL_SPEC.md` v1.4、`scripts/balance-sim.ts`
 
 ---
 
@@ -190,7 +190,7 @@
 |---|---|
 | 規則提案 | P1 主線後狀態、P4 數值聚合公式、P9 礦區方塊組成、P14 礦物固定售價、P15 精煉水晶配方、P16 素材不可出售、P17 寶物與套組名稱、P18 Legendary 加成、P19 圖鑑紀錄、P20 套組生效時機、P24–P26 市場、P27 經濟原則、P31 圖鑑寫入時機、P32 報告價值顯示、P33 玩家類型定義、P37 寶物機會上限 |
 | 暫定數值 | D14 回訪寶物 ×0.5；重挖金幣 / 寶物 ×0.5；GBS §19 的三項建議 |
-| 技術 | T4、T6–T13；T14 Supabase CLI 是否升級 v3；T15 Edge Function 匯入 `packages/` 的本地實測 |
+| 技術 | T6–T10、T12、T13（T4、T11 已於 PR #3 定案）；T14 Supabase CLI 是否升級 v3；T15 Edge Function 匯入 `packages/` 的本地實測 |
 | 尚未定義 | C-2 外觀、C-3 名稱規則、C-4 訪客模式、D-9 背包上限、E-7 大數字顯示、M-12 重置、UI-3 Header |
 | UI / UX | §9 方案的優先順序 |
 

@@ -1,0 +1,939 @@
+{
+  "engine": {
+    "dataVersion": 1,
+    "rngVersion": 1
+  },
+  "secret": "7f098b2febd2387f4617512a212bdd4c5201b80038f9dd5e2059ad0bdfe1d504",
+  "hmacBlock0": "5cc56bc8d864315b09636cca0608b270d9386c4d2ea315ad192990309b81b6ff",
+  "uint32": {
+    "0": [
+      2109574720,
+      2651666671,
+      3509792027,
+      2393138422,
+      4138772215,
+      438018058
+    ],
+    "1": [
+      3355812030,
+      116641818,
+      631336381,
+      428289672,
+      1843638347,
+      3574199719
+    ],
+    "2": [
+      939411111,
+      1653440886,
+      2771571495,
+      2468466275,
+      3995896204,
+      1544556186
+    ],
+    "999": [
+      2364493407,
+      2347506873,
+      2024531028,
+      1829061070,
+      1441650351,
+      3807949444
+    ],
+    "123456789": [
+      3706232564,
+      4284761564,
+      4266912800,
+      3454819675,
+      764442480,
+      1409974702
+    ]
+  },
+  "blocks": [
+    {
+      "label": "zone1 frontier 5m wood",
+      "stats": {
+        "power10": 20,
+        "speed1000": 1000,
+        "luckPpm": 0
+      },
+      "blockMs": 7500,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 29,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "coal": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 10,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 4
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 4176,
+        "items": {
+          "amethyst": 22,
+          "coal": 464,
+          "copper": 359,
+          "iron_ore": 351,
+          "silver": 21,
+          "stone": 1753
+        },
+        "artifacts": {}
+      }
+    },
+    {
+      "label": "zone1 frontier 80m stone Lv3",
+      "stats": {
+        "power10": 60,
+        "speed1000": 1320,
+        "luckPpm": 12000
+      },
+      "blockMs": 164142,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 29,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "coal": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 10,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 4
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 4176,
+        "items": {
+          "amethyst": 23,
+          "coal": 464,
+          "copper": 359,
+          "iron_ore": 351,
+          "silver": 21,
+          "stone": 1753
+        },
+        "artifacts": {
+          "a_z1_badge": 3,
+          "a_z1_heart": 2,
+          "a_z1_lantern": 13,
+          "a_z1_map": 10
+        }
+      }
+    },
+    {
+      "label": "zone2 frontier 170m gold Lv1",
+      "stats": {
+        "power10": 180,
+        "speed1000": 1800,
+        "luckPpm": 70000
+      },
+      "blockMs": 225309,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 252,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "silver": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 354,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "iron_ore": 2,
+            "stone": 2
+          },
+          "baseOre": "iron_ore",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 65648,
+        "items": {
+          "amethyst": 96,
+          "iron_ore": 436,
+          "sapphire": 23,
+          "silver": 886,
+          "stone": 1605
+        },
+        "artifacts": {
+          "a_z2_crown": 3,
+          "a_z2_heart": 2,
+          "a_z2_mural": 11,
+          "a_z2_orb": 14
+        }
+      }
+    },
+    {
+      "label": "zone3 frontier 290m diamond Lv5 all sets",
+      "stats": {
+        "power10": 420,
+        "speed1000": 2798,
+        "luckPpm": 208000
+      },
+      "blockMs": 276559,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 713,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "gold": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 1684,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "silver": 1
+          },
+          "baseOre": "silver",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "silver": 2,
+            "stone": 2
+          },
+          "baseOre": "silver",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "silver": 1
+          },
+          "baseOre": "silver",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 296824,
+        "items": {
+          "gold": 1031,
+          "ruby": 64,
+          "sapphire": 120,
+          "silver": 441,
+          "stone": 1455
+        },
+        "artifacts": {
+          "a_z3_crown": 2,
+          "a_z3_emblem": 14,
+          "a_z3_ring": 3,
+          "a_z3_tablet": 9
+        }
+      }
+    },
+    {
+      "label": "zone1 revisit iron Lv1",
+      "stats": {
+        "power10": 100,
+        "speed1000": 1500,
+        "luckPpm": 30000
+      },
+      "blockMs": 100000,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 8,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "coal": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 10,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 4
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 2049,
+        "items": {
+          "amethyst": 23,
+          "coal": 464,
+          "copper": 359,
+          "iron_ore": 351,
+          "silver": 21,
+          "stone": 1753
+        },
+        "artifacts": {
+          "a_z1_badge": 1,
+          "a_z1_lantern": 3,
+          "a_z1_map": 5
+        }
+      }
+    },
+    {
+      "label": "zone2 rework band 14 iron Lv5",
+      "stats": {
+        "power10": 140,
+        "speed1000": 1800,
+        "luckPpm": 42000
+      },
+      "blockMs": 150794,
+      "first12": [
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 102,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 3,
+            "silver": 1
+          },
+          "baseOre": "stone",
+          "layer2": "bundle",
+          "coins": 41,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "iron_ore": 2,
+            "stone": 2
+          },
+          "baseOre": "iron_ore",
+          "layer2": "bundle",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        },
+        {
+          "items": {
+            "stone": 1
+          },
+          "baseOre": "stone",
+          "layer2": "none",
+          "coins": 0,
+          "layer4": "none",
+          "artifact": null
+        }
+      ],
+      "totals2000": {
+        "coins": 15751,
+        "items": {
+          "amethyst": 96,
+          "iron_ore": 436,
+          "sapphire": 20,
+          "silver": 886,
+          "stone": 1605
+        },
+        "artifacts": {
+          "a_z2_crown": 1,
+          "a_z2_mural": 5,
+          "a_z2_orb": 3
+        }
+      }
+    }
+  ]
+}

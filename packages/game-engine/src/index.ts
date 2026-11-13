@@ -1,16 +1,61 @@
 /**
- * 《挖礦探險隊》遊戲引擎：純 TypeScript，不依賴 React、Zustand、Next.js 或 Deno API。
- *
- * Phase 1 只提供版本資訊與定點數工具，用來驗證 Next.js 與 Supabase Edge Functions
- * 都能匯入同一份原始碼。import 一律寫副檔名（`./fixed.ts`），Node 與 Deno 才能共用。
+ * 《挖礦探險隊》遊戲引擎核心：純 TypeScript，不依賴 React / Next.js / Supabase。
+ * Node（Next.js、模擬器、Vitest）與 Deno（Edge Functions）共用同一份原始碼，
+ * 所以相對匯入一律寫 `.ts` 副檔名。
  */
 
 import { DATA_VERSION, RNG_VERSION } from "@mining/game-data";
 
-export { MAX_HARDNESS, WORK_SCALE, blockMs, canMine } from "./fixed.ts";
+export { MAX_HARDNESS, WORK_SCALE, blockMs, canMine, mulDivFloor } from "./fixed.ts";
+export { type RandomSource, SequenceSource, uniformInt } from "./rng/random-source.ts";
+export { SFC32_WARMUP, Sfc32 } from "./rng/sfc32.ts";
+export { createHmacSha256, hmacSha256, sha256 } from "./rng/sha256.ts";
+export { RNG_SECRET_BYTES, blockMessage, createBlockRng, seedWords } from "./rng/block-rng.ts";
+export { type HeldArtifacts, type Stats, activeSets, computeStats, isArtifactId, pickaxeDef } from "./stats.ts";
+export {
+  type FrontierBlock,
+  type MiningSpot,
+  type WorkStep,
+  type ZoneIndex,
+  advanceWork,
+  bandOfBlock,
+  blockWork,
+  bottomBandOfZone,
+  frontierBlock,
+  frontierSpot,
+  hardnessOfBand,
+  requiredPower10OfBand,
+  revisitSpot,
+  revisitableZones,
+  reworkBand,
+  reworkSpot,
+  segmentOfBand,
+  spotBlockMs,
+  workRate,
+  zoneDef,
+  zoneOfBand,
+} from "./mining.ts";
+export {
+  type BlockDrops,
+  type DropOdds,
+  type DropRules,
+  DEFAULT_DROP_RULES,
+  type ExpectedBlock,
+  type Layer2Outcome,
+  type Layer4Outcome,
+  coinRange,
+  dropOdds,
+  expectedBlock,
+  pickWeighted,
+  rarePpm,
+  rollBlock,
+  treasureChancePpm,
+  treasureSplitPpm,
+} from "./drop.ts";
+export { type FirstTreasureStatus, type FirstTreasureStep, firstTreasureStep } from "./protection.ts";
 export { DEV_MARKER } from "./dev-marker.ts";
 
-export const ENGINE_VERSION = "0.1.0";
+export const ENGINE_VERSION = "0.2.0";
 
 export interface EngineInfo {
   engineVersion: string;

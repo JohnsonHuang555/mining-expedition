@@ -22,6 +22,7 @@ supabase/.branches/
 
 # Deno
 supabase/functions/**/deno.lock
+packages/**/deno.lock
 
 # Vercel
 .vercel/
@@ -29,3 +30,4 @@ supabase/functions/**/deno.lock
 # OS / editor
 .DS_Store
 *.log
+coverage/

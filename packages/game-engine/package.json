@@ -9,12 +9,15 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@mining/game-data": "workspace:*"
+    "@mining/game-data": "workspace:*",
+    "@noble/hashes": "2.4.0"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "5.1.0",
     "typescript": "5.9.3",
     "vitest": "5.1.0"
   }

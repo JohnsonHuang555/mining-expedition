@@ -1,6 +1,6 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.3（MVP v1.0 基準）**
+**Version 1.4（MVP v1.0 基準）**
 
 | 版本 | 變更 |
 |---|---|
@@ -8,10 +8,11 @@
 | v1.1 | 四層混合式掉落（D7）、回訪規則（D8）、離線上限 12 小時（D9）、十字鎬與解鎖（D10）；新增 `scripts/balance-sim.ts` |
 | v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
+| v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 
 | 項目 | 內容 |
 |---|---|
-| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3、已確認決策 D1–D22 |
+| 依據 | `docs/GDD.md` v1.3、`docs/GBS.md` v1.3.1、已確認決策 D1–D22 |
 | 範圍 | MVP：架構、資料模型、API、伺服器結算、測試規範 |
 | 標記 | 【決策 Dn】已確認；【GDD】來自企劃；【提案 Tx】技術提案，待審核 |
 
@@ -104,19 +105,20 @@ mining-expedition/
 │       ├── stores/
 │       └── lib/supabase/
 ├── packages/
-│   ├── game-engine/             # 純 TS，零框架依賴
+│   ├── game-engine/             # 純 TS，零框架依賴；唯一外部依賴 @noble/hashes
 │   │   ├── src/
-│   │   │   ├── fixed/           # 定點數工具
-│   │   │   ├── rng/             # RandomSource、sfc32、HMAC 種子
-│   │   │   ├── stats/           # 數值聚合
-│   │   │   ├── mining/          # 工作量、門檻、預測
-│   │   │   ├── drop/            # 三層掉落
-│   │   │   ├── settle/          # 結算（在線 / 離線）
-│   │   │   ├── actions/         # 購買、強化、製作、出售、解鎖
-│   │   │   ├── market/          # 倍率生成
-│   │   │   └── collection/      # 圖鑑、套組判定
-│   │   └── test/
-│   └── game-data/               # 靜態資料（GBS 數值表），附 DATA_VERSION
+│   │   │   ├── fixed.ts         # 定點數工具（blockMs、mulDivFloor、BigInt 防溢位）     ✅ Engine Core
+│   │   │   ├── rng/             # RandomSource、sfc32、HMAC（@noble/hashes）、逐方塊種子 ✅ Engine Core
+│   │   │   ├── stats.ts         # 數值聚合、套組判定                                    ✅ Engine Core
+│   │   │   ├── mining.ts        # 深度、門檻、前線 / 回訪 / 重挖位置、工作量            ✅ Engine Core
+│   │   │   ├── drop.ts          # 四層掉落、機率（ppm）、期望值                         ✅ Engine Core
+│   │   │   ├── protection.ts    # 首次寶物保護的純判定（狀態保存屬於 settle）           ✅ Engine Core
+│   │   │   ├── settle/          # 結算（在線 / 離線）                                   Settlement 階段
+│   │   │   ├── actions/         # 購買、強化、製作、出售、解鎖                          Actions 階段
+│   │   │   ├── market/          # 倍率生成                                              Market 階段
+│   │   │   └── collection/      # 圖鑑                                                  Collection 階段
+│   │   └── test/                # Vitest；fixtures/golden-v1.json（Node / Deno 共用快照）
+│   └── game-data/               # 靜態資料（GBS 數值表），附 DATA_VERSION / RNG_VERSION
 ├── supabase/
 │   ├── migrations/              # SQL schema、RLS、RPC
 │   ├── functions/               # Edge Functions
@@ -135,7 +137,11 @@ Edge Function 以函式目錄內的 `deno.json` 對應 `@mining/game-engine` 到
 
 - 引擎原始碼的 import 一律寫副檔名（`./fixed.ts`），讓 Node（Next.js、Vitest）與 Deno 都能直接讀取同一份檔案。
 - 套件管理：pnpm workspace。【決策 D21】
-- 引擎唯一的外部依賴：`@noble/hashes`（同步的 HMAC-SHA256，Node / Deno / 瀏覽器都能用）。【提案 T4】
+- 引擎唯一的外部依賴：`@noble/hashes`，版本固定 **2.4.0**（Node 由 `packages/game-engine/package.json`、Deno 由各 `deno.json` 的 import map 對應 `npm:@noble/hashes@2.4.0/hmac.js`、`sha2.js`，兩邊必須同版）。【決策 T4 定案，PR #3】
+  - 選擇理由：已有安全審查、持續維護、零依賴、同步 API，Node / Deno / 瀏覽器都能用。不用 Web Crypto，因為 `crypto.subtle` 只有非同步 API。
+  - 實測（PR #3）：Node 每方塊（HMAC + 四層掉落）約 4 µs、Deno 約 5–6 µs；與自寫實作的輸出逐位元組相同，所以 RNG_VERSION 與確定性快照不變。12 小時離線結算的實際 CPU 成本在 Settlement 階段以 Edge Function 實測。
+  - **用途界線**：只用於遊戲亂數的種子（逐方塊、市場），使結果可重現且 Client 無法預測。不用於簽章、身分驗證、密碼雜湊或金鑰派生。
+  - 升級版本時必須：確認 golden 快照不變、Node 與 Deno 同步改版、在 PR 說明。
 
 ---
 
@@ -181,18 +187,27 @@ canMine     = power10 ≥ requiredPower10
 // 第二層：礦物
 rarePpm     = floor( rareBasePpm[zone] × (1,000,000 + luckPpm) / 1,000,000 )
 bundlePpm   = 150,000
-nonePpm     = 1,000,000 − bundlePpm − rarePpm
+nonePpm     = 1,000,000 − bundlePpm − rarePpm                          // < 0 時拒絕（資料錯誤）
 
-// 第三層：金幣
+// 第三層：金幣（modeCoinPpm：前線 1,000,000、回訪 500,000【D12】、重挖 500,000【暫定】）
 coinPpm     = 100,000
-coinAvg     = coinAvgBySegment[seg] × (frontier ? 2 : 1) / 2          // 回訪 ×0.5（D12）、重挖 ×0.5（暫定）
+a           = coinAvgBySegment[seg] × modeCoinPpm                     // = Avg × 10^6
+coinMin     = floor( (a + 1,000,000) / 2,000,000 )                    // = round(0.5 × Avg)，.5 進位
+coinMax     = floor( (3a + 1,000,000) / 2,000,000 )                   // = round(1.5 × Avg)
+amount      = coinMin + nextInt(coinMax − coinMin + 1)
 
-// 第四層：寶物（treasurePerHourMilli：0.35/h → 350）
+// 第四層：寶物（treasurePerHourMilli：0.35/h → 350；modeTreasurePpm：前線 1,000,000、回訪 / 重挖 500,000）
 chancePpm   = min( 500,000,
-                   floor( treasurePerHourMilli × blockMs × (frontier ? 2 : 1) / (2 × 3,600) ) )   // 回訪 / 重挖 ×0.5
-legPpm      = floor( chancePpm × 100,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
-epicPpm     = floor( chancePpm × 900,000 / 1,000,000 × (1,000,000 + luckPpm) / 1,000,000 )
+                   floor( treasurePerHourMilli × blockMs × modeTreasurePpm / 3,600,000,000 ) )
+legPpm      = floor( chancePpm × 100,000 × (1,000,000 + luckPpm) / 10^12 )   // 單次取整
+epicPpm     = floor( chancePpm × 900,000 × (1,000,000 + luckPpm) / 10^12 )
+noTreasure  = 1,000,000 − legPpm − epicPpm                             // < 0 時拒絕
 ```
+
+- **單次取整**：每個公式只在最後 `floor` 一次（先乘後除）。v1.3 的寫法 `chancePpm × 100,000 / 1,000,000 × …` 若逐步整數除法，會多一次取整；v1.4 明確定義為單次取整。
+- **BigInt**：`epicPpm` 的中間值最大約 `500,000 × 900,000 × 1,208,000 ≈ 5.4 × 10^17`，超過 `2^53`。引擎以 `mulDivFloor` 計算：乘積 ≤ `2^53 − 1` 時用 Number（以餘數修正捨入，結果精確），否則改用 BigInt；結果超出 safe integer 時丟出錯誤。Postgres 端（若需要）使用 `numeric` 或 `bigint` 的同一順序。
+- **blockMs**：第四層使用該方塊**實際的挖掘毫秒數**（換裝備時跨越不同速率的累加值，P5），不是以完成時的數值重算。
+- **mode 倍率**以 ppm 表示（`COIN_MODE_MULTIPLIER_PPM`、`TREASURE_MODE_MULTIPLIER_PPM`，`packages/game-data`）。v1.3 的 `(frontier ? 2 : 1) / 2` 是同一個結果的特例寫法。
 
 首次保護：
 
@@ -219,19 +234,32 @@ interface RandomSource {
 }
 ```
 
-引擎只依賴這個介面；測試可以注入固定序列。
+引擎只依賴這個介面；測試可以注入固定序列（`SequenceSource`）。
+
+`nextInt(n)`（RNG_VERSION 1）：`limit = 2^32 − (2^32 mod n)`；重複取 `x = nextUint32()` 直到 `x < limit`，回傳 `x mod n`。每次拒絕多消耗一個 uint32。`n` 必須是 1–2^32 的整數。
 
 ### 6.2 方塊亂數
 
 每個完成的方塊各自建立一個 PRNG，不需要儲存 PRNG 狀態：
 
 ```
-digest = HMAC-SHA256( key = player.rngSecret, msg = "block:" + digCounter )
-rng    = sfc32( digest[0..15] 拆成 4 個 uint32 )
+digest       = HMAC-SHA256( key = player.rngSecret, msg = UTF-8("block:" + digCounter 的十進位) )
+(a, b, c, d) = digest[0..3], digest[4..7], digest[8..11], digest[12..15]，各為 big-endian uint32
+rng          = sfc32(a, b, c, d)，先丟棄 12 個輸出（warm-up）
 ```
 
+RNG_VERSION 1 的精確定義（`packages/game-engine/src/rng/`）：
+
+- sfc32 每步：`t = a + b + d; d = d + 1; a = b ^ (b >>> 9); b = c + (c << 3); c = rotl(c, 21) + t; 輸出 t`（全部 mod 2^32）。
+- 加權抽取：一次 `nextInt(Σweight)`，依資料表順序累加，落在 `[累積, 累積 + weight)` 的項目。
+- 各層區間（`u = nextInt(1,000,000)`）：
+  - 第二層：`[0, bundlePpm)` 礦石包；`[bundlePpm, bundlePpm + rarePpm)` Rare；其餘為無
+  - 第三層：`u < coinPpm` 命中
+  - 第四層：`[0, legPpm)` Legendary；`[legPpm, legPpm + epicPpm)` Epic；其餘為無
+- 跨執行環境快照：`packages/game-engine/test/fixtures/golden-v1.json`。Vitest（Node）與 CI 的 Deno 都必須產生完全相同的結果（§14.2）。
+
 - `digCounter`：玩家每完成一個方塊（前線或回訪）就加 1，只由伺服器遞增。
-- `rngSecret`：每位玩家 32 bytes 隨機密鑰，存在 Client 無法讀取的 schema（§8.3）。
+- `rngSecret`：每位玩家 32 bytes 隨機密鑰，存在 Client 無法讀取的 schema（§8.3）。`createBlockRng` 只接受剛好 32 bytes 的 `Uint8Array`，否則丟出錯誤（避免載入錯誤資料時悄悄產生「合法」的亂數）。
 - 因為結果依方塊編號而定，放棄挖到一半的方塊或切換礦區都無法重新抽獎。
 - 一個方塊內的亂數消耗順序固定（GBS §4.3、§7）：
   1. 第一層：OreType（1 次）
@@ -608,7 +636,7 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 
 ### 14.1 單元測試（Vitest）【GDD】
 
-引擎每個模組都要有單元測試，涵蓋率目標：`game-engine` 行涵蓋率 ≥ 90%。【提案 T11】
+引擎每個模組都要有單元測試，涵蓋率門檻：`game-engine` lines / statements / functions ≥ 90%、branches ≥ 85%（`packages/game-engine/vitest.config.ts`，CI 執行 `pnpm --filter @mining/game-engine coverage`）。【T11】
 
 必要案例：
 
@@ -621,7 +649,7 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | drop | Luck 0.12 時：zone1 Rare = 28,000 ppm；寶物 Legendary = `Chance × 0.1 × 1.12` |
 | drop | 回訪：寶物 Chance ×0.5、金幣金額 ×0.5；礦物表不變 |
 | drop | 同一位置只改變強化等級：寶物每小時期望值只隨 Luck 改變（GBS §7.6） |
-| drop | 觸發機率上限為 1,000,000 ppm |
+| drop | 寶物機會上限 500,000 ppm（GBS P37）；最大 Luck 下 `legPpm + epicPpm ≤ 1,000,000` |
 | settle | 300 秒以內入帳；超過 300 秒產生報告；12 小時上限；超過部分捨棄 |
 | settle | 回訪模式使用該礦區最深深度帶的 Hardness 與 RequiredPower；不改變 `frontierBlockIndex` |
 | settle | 前線到礦區底部且未付費解鎖時停止（D10） |
@@ -658,21 +686,22 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 ### 14.2 確定性測試
 
 - 固定 `rngSecret` + 固定狀態 + 固定時間 → 結果與快照（golden file）完全一致。
+  - Engine Core：`test/golden.ts` 產生逐方塊亂數與六種位置 × 2,000 方塊的掉落；`fixtures/golden-v1.json` 由 Vitest 比對，CI 另以 `node` 與 `deno` 執行 `test/golden-cli.ts` 並與同一份 fixture 比對。
+  - 結算層的快照（固定狀態 + 時間）在 Settlement 階段加入。
 - 同一段時間「一次結算」和「切成多次結算」的結果必須一致（在線模式、沒有套組變化時）。
 - 改變亂數消耗順序的修改必須更新快照，並在 PR 中說明。
 
 ### 14.3 統計測試
 
-- 每一層抽樣 10^6 次，各結果頻率與理論值誤差在 ±3 個標準差內。
+- 每一層抽樣 10^6 次，各結果頻率與理論值誤差在 ±3 個標準差內。密鑰固定，所以測試是確定性的。
 - 物品權重表抽樣驗證。
 
 ### 14.4 平衡模擬
 
-- `scripts/balance-sim.ts` 是**開發輔助工具**，不是遊戲實作。目前內含 GBS v1.2 數值的副本與參考玩家策略。
-- 執行與參數見檔案開頭說明與 GBS §23（Node 22.18+ 可直接執行 TypeScript，不需安裝套件）。可切換：首次保護門檻、回訪 / 重挖的金幣與寶物倍率、D13 前後的金幣表、是否啟用重挖、出售策略。
+- `scripts/balance-sim.ts` 是**開發輔助工具**，不是遊戲實作。資料匯入 `@mining/game-data`，規則（數值聚合、門檻、工作量、四層掉落、逐方塊 HMAC 亂數、首次保護判定）匯入 `@mining/game-engine`；腳本只保留參考玩家策略、時間推進與報表。
+- 執行與參數見檔案開頭說明與 GBS §23（Node 22.18+，先 `pnpm install`）。可切換：首次保護門檻、回訪 / 重挖的金幣與寶物倍率、D13 前後的金幣表、是否啟用重挖、出售策略。非預設方案經由引擎的 `DropRules` 參數與 `firstTreasureStep` 的門檻參數傳入，正式結算一律使用預設值。
 - 輸出：玩家類型完成時間（平均、P10、P50、P90、P99）、裝備購買時間點、回訪 / 重挖 vs 前線收益表、Mining Speed 驗證、首次保護 A / B / C、主線後補齊收藏、防卡死壓力測試、D12–D16 前後比較。
 - 模擬器與正式引擎的已知差異列在 GBS §23.2。
-- 引擎完成後，腳本改為匯入 `packages/game-data` 與 `packages/game-engine`，刪除內含的資料副本，避免兩份規則不同步。
 - 結果必須符合 GBS §18 的標準，納入 CI。
 
 ### 14.5 整合測試（本機 Supabase）
@@ -796,7 +825,6 @@ flowchart LR
 
 | # | 項目 |
 |---|---|
-| T4 | 引擎依賴 `@noble/hashes` |
 | T6–T8 | 定點數、亂數、市場實作細節（依本文件實作，測試時確認） |
 | T9 | 結算排程參數（5 秒 / 60 秒 / 300 秒） |
 | T10 | 單頁 Tab 路由 |
@@ -807,4 +835,4 @@ flowchart LR
 | — | 是否需要訪客模式（C-4）。本規格假設**必須登入**，因為伺服器權威需要身分 |
 | — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次）；多帳號不在 MVP 防範範圍內 |
 
-已定案：T1、T2（D21）、T3 pnpm（D21）、T5 不回溯（D19）、首次保護門檻（D18）。
+已定案：T1、T2（D21）、T3 pnpm（D21）、T4 `@noble/hashes` 2.4.0（§3.4，PR #3）、T5 不回溯（D19）、首次保護門檻（D18）、T11 涵蓋率門檻（§14.1，CI 強制）。
