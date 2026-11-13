@@ -191,6 +191,7 @@ dev pnpm typecheck   # 所有 packages、apps 與 scripts 的型別檢查
 dev pnpm test        # Vitest（packages/game-engine：資料一致性、定點數、亂數、數值、挖掘、掉落、首次保護判定、確定性快照）
 dev pnpm build       # 依序建置所有 workspace（packages 型別檢查 + next build）
 dev pnpm check       # 以上三項
+dev pnpm --filter @mining/game-engine coverage   # 引擎涵蓋率（門檻見 packages/game-engine/vitest.config.ts）
 dev pnpm sim         # 平衡模擬（使用共用的 game-data / game-engine；全部報表約 10–15 分鐘）
 ```
 
@@ -204,7 +205,7 @@ dev pnpm sim         # 平衡模擬（使用共用的 game-data / game-engine；
 
 | Job | 內容 |
 |---|---|
-| install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎快照（Node）→ 模擬器 smoke run → `pnpm build`（Node 22，不使用 Docker） |
+| install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎涵蓋率門檻（lines ≥ 90%）→ 引擎快照（Node）→ 模擬器 smoke run → `pnpm build`（Node 22，不使用 Docker） |
 | deno check (Edge Functions) / engine determinism | 以 Deno 型別檢查 Edge Function（含匯入 `packages/`）與引擎；Deno 執行引擎快照並與 Node 使用的 fixture 比對 |
 | docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`、`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
 

@@ -8,7 +8,7 @@
 | v1.1 | 四層混合式掉落（D7）、回訪規則（D8）、離線上限 12 小時（D9）、十字鎬與解鎖（D10）；新增 `scripts/balance-sim.ts` |
 | v1.2 | 回訪金幣 ×0.5（D12）、金幣依門檻段（D13）、回訪寶物 ×0.5（D14）、只能回訪較淺礦區（D15）、重挖模式（D16）、首次寶物保護（D17） |
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
-| v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 改為引擎內建（T4 修訂，無外部依賴）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
+| v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 
 | 項目 | 內容 |
 |---|---|
@@ -105,10 +105,10 @@ mining-expedition/
 │       ├── stores/
 │       └── lib/supabase/
 ├── packages/
-│   ├── game-engine/             # 純 TS，零框架依賴、零外部依賴
+│   ├── game-engine/             # 純 TS，零框架依賴；唯一外部依賴 @noble/hashes
 │   │   ├── src/
 │   │   │   ├── fixed.ts         # 定點數工具（blockMs、mulDivFloor、BigInt 防溢位）     ✅ Engine Core
-│   │   │   ├── rng/             # RandomSource、sfc32、SHA-256 / HMAC、逐方塊種子      ✅ Engine Core
+│   │   │   ├── rng/             # RandomSource、sfc32、HMAC（@noble/hashes）、逐方塊種子 ✅ Engine Core
 │   │   │   ├── stats.ts         # 數值聚合、套組判定                                    ✅ Engine Core
 │   │   │   ├── mining.ts        # 深度、門檻、前線 / 回訪 / 重挖位置、工作量            ✅ Engine Core
 │   │   │   ├── drop.ts          # 四層掉落、機率（ppm）、期望值                         ✅ Engine Core
@@ -137,9 +137,11 @@ Edge Function 以函式目錄內的 `deno.json` 對應 `@mining/game-engine` 到
 
 - 引擎原始碼的 import 一律寫副檔名（`./fixed.ts`），讓 Node（Next.js、Vitest）與 Deno 都能直接讀取同一份檔案。
 - 套件管理：pnpm workspace。【決策 D21】
-- 引擎沒有外部依賴。HMAC-SHA256 以純 TypeScript 實作在 `rng/sha256.ts`（同步；Node / Deno / 瀏覽器都能用），以 RFC 4231 測試向量與 `node:crypto` 交叉驗證。【提案 T4 修訂：原提案為 `@noble/hashes`】
-  - 不用 Web Crypto：`crypto.subtle` 只有非同步 API，結算一次可能有上千個方塊。
-  - 不用 `@noble/hashes`：避免 Edge Function 的 npm 解析與版本鎖定問題；實作只有約 100 行，且固定在 RNG_VERSION 1。
+- 引擎唯一的外部依賴：`@noble/hashes`，版本固定 **2.4.0**（Node 由 `packages/game-engine/package.json`、Deno 由各 `deno.json` 的 import map 對應 `npm:@noble/hashes@2.4.0/hmac.js`、`sha2.js`，兩邊必須同版）。【決策 T4 定案，PR #3】
+  - 選擇理由：已有安全審查、持續維護、零依賴、同步 API，Node / Deno / 瀏覽器都能用。不用 Web Crypto，因為 `crypto.subtle` 只有非同步 API。
+  - 實測（PR #3）：Node 每方塊（HMAC + 四層掉落）約 4 µs、Deno 約 5–6 µs；與自寫實作的輸出逐位元組相同，所以 RNG_VERSION 與確定性快照不變。12 小時離線結算的實際 CPU 成本在 Settlement 階段以 Edge Function 實測。
+  - **用途界線**：只用於遊戲亂數的種子（逐方塊、市場），使結果可重現且 Client 無法預測。不用於簽章、身分驗證、密碼雜湊或金鑰派生。
+  - 升級版本時必須：確認 golden 快照不變、Node 與 Deno 同步改版、在 PR 說明。
 
 ---
 
@@ -257,7 +259,7 @@ RNG_VERSION 1 的精確定義（`packages/game-engine/src/rng/`）：
 - 跨執行環境快照：`packages/game-engine/test/fixtures/golden-v1.json`。Vitest（Node）與 CI 的 Deno 都必須產生完全相同的結果（§14.2）。
 
 - `digCounter`：玩家每完成一個方塊（前線或回訪）就加 1，只由伺服器遞增。
-- `rngSecret`：每位玩家 32 bytes 隨機密鑰，存在 Client 無法讀取的 schema（§8.3）。
+- `rngSecret`：每位玩家 32 bytes 隨機密鑰，存在 Client 無法讀取的 schema（§8.3）。`createBlockRng` 只接受剛好 32 bytes 的 `Uint8Array`，否則丟出錯誤（避免載入錯誤資料時悄悄產生「合法」的亂數）。
 - 因為結果依方塊編號而定，放棄挖到一半的方塊或切換礦區都無法重新抽獎。
 - 一個方塊內的亂數消耗順序固定（GBS §4.3、§7）：
   1. 第一層：OreType（1 次）
@@ -634,7 +636,7 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 
 ### 14.1 單元測試（Vitest）【GDD】
 
-引擎每個模組都要有單元測試，涵蓋率目標：`game-engine` 行涵蓋率 ≥ 90%。【提案 T11】
+引擎每個模組都要有單元測試，涵蓋率門檻：`game-engine` lines / statements / functions ≥ 90%、branches ≥ 85%（`packages/game-engine/vitest.config.ts`，CI 執行 `pnpm --filter @mining/game-engine coverage`）。【T11】
 
 必要案例：
 
@@ -823,7 +825,6 @@ flowchart LR
 
 | # | 項目 |
 |---|---|
-| T4 | ~~引擎依賴 `@noble/hashes`~~ → v1.4 改為引擎內建純 TS HMAC-SHA256（§3.4），待審核 |
 | T6–T8 | 定點數、亂數、市場實作細節（依本文件實作，測試時確認） |
 | T9 | 結算排程參數（5 秒 / 60 秒 / 300 秒） |
 | T10 | 單頁 Tab 路由 |
@@ -834,4 +835,4 @@ flowchart LR
 | — | 是否需要訪客模式（C-4）。本規格假設**必須登入**，因為伺服器權威需要身分 |
 | — | 首次保護以帳號為單位：每個 `auth.uid()` 只能建立一個角色（`character-create` 只能一次）；多帳號不在 MVP 防範範圍內 |
 
-已定案：T1、T2（D21）、T3 pnpm（D21）、T5 不回溯（D19）、首次保護門檻（D18）。
+已定案：T1、T2（D21）、T3 pnpm（D21）、T4 `@noble/hashes` 2.4.0（§3.4，PR #3）、T5 不回溯（D19）、首次保護門檻（D18）、T11 涵蓋率門檻（§14.1，CI 強制）。
