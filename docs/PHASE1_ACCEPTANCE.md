@@ -36,6 +36,7 @@ CI 的完整紀錄：PR #2 的 Checks → `docker integration (Linux)`，其中 
 cp .env.example .env
 docker compose build
 docker compose run --rm dev pnpm install
+docker compose up --no-start web                     # 建立 Supabase 網路（只綁定 127.0.0.1）
 docker compose run --rm dev pnpm supabase:start
 docker compose run --rm dev pnpm env:sync
 docker compose up -d web
@@ -111,11 +112,11 @@ Windows 實測（Docker Desktop，區網 IP 192.168.1.179）：
 |---|---|
 | `core.autocrlf=true` 讓 `docker/entrypoint.sh` 以 CRLF 檢出，容器無法啟動（`bash\r`） | 新增 `.gitattributes`（`* text=auto eol=lf`） |
 | Socket 屬於 root → 入口腳本改用代理 socket，`DOCKER_HOST=unix:///var/run/docker-node.sock`；Supabase CLI 把這個路徑從**宿主**掛載給 Vector，宿主上不存在 → Vector unhealthy，`supabase start` 失敗。CI（Linux）走群組授權分支，所以沒遇到 | `supabase/config.toml` 關閉 `[analytics]`（不啟動 Vector / Logflare） |
-| Compose 2.23 執行 `docker compose run dev` 時也要求外部網路存在，`supabase start` 前的 `pnpm install` 就失敗 | Supabase 網路改由 compose 建立（不再是 `external`），任何 `docker compose run` 都會先建立；`supabase start` 沿用同名網路 |
+| Compose 2.23 執行 `docker compose run dev` 時也要求外部網路存在，`supabase start` 前的 `pnpm install` 就失敗 | Supabase 網路改由 compose 建立（不再是 `external`）。注意：Compose 2.23 的 `run dev` 會建立所有網路，但較新版本（CI）只建立該服務用到的網路，所以加上明確的 `docker compose up --no-start web` 步驟；`supabase:start` 前置檢查網路存在且綁定 127.0.0.1 |
 | PowerShell 沒有 `PWD` 環境變數；Windows 路徑無法當作容器內路徑 | `.env` 設 `PROJECT_ROOT=/run/desktop/mnt/host/<磁碟>/...`（Docker Desktop VM 內的同一路徑，宿主 daemon 與容器內都成立） |
 
 ## 已知限制
 
 1. **新增 `packages/` 檔案後要重新啟動 Supabase**：Edge Runtime 只掛載啟動當下被匯入的檔案。新增檔案或新的匯入後，執行 `dev pnpm supabase:stop && dev pnpm supabase:start`。
 2. **編輯器的「安全存檔」可能讓 Edge Runtime 看不到變更**：單一檔案的 bind mount 綁定的是原本的檔案；若編輯器以「寫入暫存檔再改名」方式存檔（例如 JetBrains 的 safe write），容器內仍是舊內容。VS Code 預設直接覆寫，不受影響。遇到時重新啟動 Supabase，或關閉 safe write。
-3. **Loopback 綁定依賴網路設定**：只綁定 `127.0.0.1` 是靠 compose 建立的 Supabase 網路選項。若網路被刪除後直接在宿主或其他方式執行 `supabase start`（不經 `docker compose run`），CLI 會自建網路並綁定 `0.0.0.0`。`verify:env` 會偵測並失敗；請一律經 `docker compose run --rm dev` 操作。
+3. **Loopback 綁定依賴網路設定**：只綁定 `127.0.0.1` 是靠 compose 建立的 Supabase 網路選項。`pnpm supabase:start` 會在網路不存在或缺少選項時拒絕啟動；但直接執行 `supabase start`（繞過 pnpm script）時 CLI 會自建網路並綁定 `0.0.0.0`。`verify:env` 會偵測並失敗；請一律用 `pnpm supabase:start`。

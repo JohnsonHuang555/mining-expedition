@@ -12,7 +12,7 @@
     "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.scripts.json",
     "test": "pnpm -r run test",
     "check": "pnpm typecheck && pnpm test && pnpm build",
-    "supabase:start": "supabase start",
+    "supabase:start": "node scripts/check-network.ts && supabase start",
     "supabase:stop": "supabase stop",
     "supabase:status": "supabase status",
     "db:reset": "supabase db reset",

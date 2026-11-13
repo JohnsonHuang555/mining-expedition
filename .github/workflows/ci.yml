@@ -56,6 +56,8 @@ jobs:
         run: docker compose build
       - name: pnpm install (in dev container)
         run: docker compose run --rm -T dev pnpm install --frozen-lockfile
+      - name: Create networks (supabase network binds published ports to 127.0.0.1)
+        run: docker compose up --no-start web
       - name: supabase start (in dev container, via Docker socket)
         run: docker compose run --rm -T dev pnpm supabase:start
       - name: env:sync

@@ -53,6 +53,7 @@ mining-expedition/
 cp .env.example .env                                   # 1. compose 設定（通常不需修改）
 docker compose build                                   # 2. 建立開發容器映像
 docker compose run --rm dev pnpm install               # 3. 安裝套件
+docker compose up --no-start web                       # 3a. 建立 Supabase 網路（只綁定 127.0.0.1）與 web 容器，不啟動
 docker compose run --rm dev pnpm supabase:start        # 4. 啟動 Supabase Local（第一次會下載映像，需要幾分鐘）
 docker compose run --rm dev pnpm env:sync              # 5. 產生 apps/web/.env.local
 docker compose up -d web                               # 6. 啟動 Next.js（Hot Reload）
@@ -63,7 +64,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 全部成功時，第 7 步顯示七個 ✅（含「埠只綁定 loopback」與「非 loopback 介面連不到」）、第 8 步顯示兩個 ✅。驗收項目與目前狀態見 [`docs/PHASE1_ACCEPTANCE.md`](docs/PHASE1_ACCEPTANCE.md)。
 
 > `web` 會加入 Supabase 的 Docker 網路，所以一定要先啟動 Supabase（第 4 步）再啟動 web（第 6 步）。
-> Supabase 的網路 `supabase_network_mining-expedition` 由 compose 建立（第一次 `docker compose run` 時），並設定發布的埠只綁定 `127.0.0.1`；`supabase start` 會沿用這個網路。`supabase start` 結尾的 `All services bind to 0.0.0.0` 是 CLI 固定的提示文字，實際綁定以 `verify:env` 為準。
+> Supabase 的網路 `supabase_network_mining-expedition` 由 compose 建立（第 3a 步），並設定發布的埠只綁定 `127.0.0.1`；`supabase start` 會沿用這個網路。`pnpm supabase:start` 啟動前會檢查網路存在且設定正確，否則拒絕啟動（避免 CLI 自建一個綁定 `0.0.0.0` 的網路）。`docker compose down` 之後要再次啟動時，也要先做第 3a 步。`supabase start` 結尾的 `All services bind to 0.0.0.0` 是 CLI 固定的提示文字，實際綁定以 `verify:env` 為準。
 >
 > **從舊版設定升級**（網路由 `supabase start` 或手動 `docker network create` 建立過）：compose 會出現 `network ... was found but has incorrect label`。執行一次：
 > ```bash
@@ -71,7 +72,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 > docker compose rm -sf web
 > docker network rm supabase_network_mining-expedition
 > ```
-> 再從第 4 步重新啟動。
+> 再從第 3a 步重新啟動。
 
 #### Windows（PowerShell）
 
@@ -171,6 +172,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | `supabase start` 出現 `permission denied ... docker.sock` | `docker compose run --rm dev docker info` 確認容器能存取 Docker；回報輸出 |
 | `supabase start` 等待健康檢查逾時 | 確認 Docker Desktop 支援 host network（Settings → Resources → Network → Enable host networking），或回報日誌 |
 | `web` 連不到 Supabase | 重新執行 `dev pnpm env:sync`，再 `docker compose restart web` |
+| `supabase:start` 出現 `❌ 找不到 Docker 網路 supabase_network_mining-expedition` | 先 `docker compose up --no-start web`（第 3a 步） |
 | `network supabase_network_mining-expedition was found but has incorrect label` | 網路不是由 compose 建立：見上方「從舊版設定升級」 |
 | `verify:env` 的「埠只綁定 loopback」或「非 loopback 介面連不到」失敗 | 同上，網路缺少 `host_binding_ipv4` 選項；`docker network inspect supabase_network_mining-expedition --format '{{json .Options}}'` 確認 |
 | `docker compose down` 出現 `network ... has active endpoints` | Supabase 仍在執行：先 `dev pnpm supabase:stop` 再 `docker compose down` |

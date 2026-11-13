@@ -10,6 +10,7 @@
     "target": "ES2022"
   },
   "include": [
+    "scripts/check-network.ts",
     "scripts/env-sync.ts",
     "scripts/verify-env.ts",
     "scripts/verify-hot-reload.ts",
