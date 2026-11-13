@@ -53,9 +53,65 @@ export {
   treasureSplitPpm,
 } from "./drop.ts";
 export { type FirstTreasureStatus, type FirstTreasureStep, firstTreasureStep } from "./protection.ts";
+export {
+  STATE_SCHEMA_VERSION,
+  type ArtifactInstance,
+  type ArtifactSource,
+  type DiscoveryRecord,
+  type FirstTreasureState,
+  type Inventory,
+  type MiningPosition,
+  type MiningState,
+  type MiningStatus,
+  type OfflineReport,
+  type PlayerGameState,
+  type PlayerStateView,
+  type ReportArtifact,
+  type StopReason,
+  assertValidState,
+  cloneState,
+  createInitialState,
+  currentStats,
+  heldCounts,
+  miningPosition,
+  toPlayerView,
+  validateState,
+} from "./state.ts";
+export { type GameError, type GameErrorCode, gameError } from "./errors.ts";
+export type { BlockRecord, GameEvent } from "./events.ts";
+export {
+  type SettleContext,
+  type SettleKind,
+  type SettleOptions,
+  type SettleResult,
+  type SettleSummary,
+  artifactInstanceId,
+  reportIdFor,
+  settle,
+} from "./settle.ts";
+export {
+  MAX_ACTION_QUANTITY,
+  MAX_ARTIFACTS_PER_SALE,
+  type ActionContext,
+  type ActionResult,
+  type GameAction,
+  applyAction,
+  parseAction,
+} from "./actions.ts";
+export {
+  MAX_REQUEST_ID_LENGTH,
+  type CommitPlan,
+  type GameCommand,
+  type GameRequest,
+  type RequestContext,
+  type RequestResult,
+  canonicalCommandJson,
+  executeRequest,
+  parseCommand,
+} from "./request.ts";
 export { DEV_MARKER } from "./dev-marker.ts";
 
-export const ENGINE_VERSION = "0.2.0";
+export const ENGINE_VERSION = "0.3.0";
 
 export interface EngineInfo {
   engineVersion: string;

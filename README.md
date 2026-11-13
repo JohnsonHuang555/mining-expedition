@@ -192,7 +192,7 @@ dev pnpm test        # Vitest（packages/game-engine：資料一致性、定點�
 dev pnpm build       # 依序建置所有 workspace（packages 型別檢查 + next build）
 dev pnpm check       # 以上三項
 dev pnpm --filter @mining/game-engine coverage   # 引擎涵蓋率（門檻見 packages/game-engine/vitest.config.ts）
-dev pnpm sim         # 平衡模擬（使用共用的 game-data / game-engine；全部報表約 10–15 分鐘）
+dev pnpm sim         # 平衡模擬（使用正式的 settle / applyAction；全部報表單一程序約 40 分鐘，可用 --only 分段）
 ```
 
 引擎的確定性快照在 `packages/game-engine/test/fixtures/golden-v1.json`。Node（Vitest）與 Deno（CI）都必須產生完全相同的結果；只有 `RNG_VERSION` 或 `DATA_VERSION` 改變時才重新產生（`node packages/game-engine/test/golden-cli.ts > …/golden-v<N>.json`，舊快照保留）。
