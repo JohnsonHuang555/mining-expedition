@@ -1,0 +1,31 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# Next.js
+apps/web/.next/
+apps/web/next-env.d.ts
+*.tsbuildinfo
+
+# env（本地與正式的實際值都不進版控；範本是 *.example）
+.env
+.env.*
+!.env.example
+apps/web/.env*
+!apps/web/.env.example
+supabase/functions/.env*
+!supabase/functions/.env.example
+
+# Supabase CLI 本地暫存
+supabase/.temp/
+supabase/.branches/
+
+# Deno
+supabase/functions/**/deno.lock
+
+# Vercel
+.vercel/
+
+# OS / editor
+.DS_Store
+*.log

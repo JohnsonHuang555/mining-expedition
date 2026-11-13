@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noUncheckedIndexedAccess": false,
+    "erasableSyntaxOnly": true
+  },
+  "include": ["scripts/env-sync.ts", "scripts/verify-env.ts"]
+}

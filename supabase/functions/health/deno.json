@@ -1,0 +1,7 @@
+{
+  "imports": {
+    "@mining/game-engine": "../../../packages/game-engine/src/index.ts",
+    "@mining/game-data": "../../../packages/game-data/src/index.ts",
+    "@supabase/supabase-js": "npm:@supabase/supabase-js@2.119.0"
+  }
+}

@@ -1,0 +1,35 @@
+# Supabase 本地開發設定（Supabase CLI v2.122.1）
+# 只列出與預設值不同、或專案需要明確指定的項目；其餘使用 CLI 預設值。
+# 這個檔案只影響 `supabase start` 的本地環境；Supabase Cloud 的設定在 Dashboard 或 `supabase config push`。
+
+project_id = "mining-expedition"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+additional_redirect_urls = ["http://localhost:3000"]
+
+[edge_runtime]
+enabled = true
+# per_worker：檔案變更時自動重新載入（本地開發用）
+policy = "per_worker"
+
+# Phase 1 連線檢查用，不需要登入
+[functions.health]
+verify_jwt = false
