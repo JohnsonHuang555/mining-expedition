@@ -1,21 +1,24 @@
 /**
  * 《挖礦探險隊》平衡模擬 — 開發輔助工具（不是遊戲實作）
  *
- * 用 GBS v1.2 的規則與數值模擬「參考玩家」從 0m 挖到 300m，驗證 GBS §18。
- * 正式引擎完成後，資料與規則應改為匯入 `packages/game-data` / `packages/game-engine`，
- * 本檔只保留玩家策略與報表（與正式實作的差異見 GBS §22）。
+ * 用 GBS v1.3 的規則與數值模擬「參考玩家」從 0m 挖到 300m，驗證 GBS §18。
+ * 資料來自 `@mining/game-data`，規則（數值聚合、門檻、工作量、四層掉落、逐方塊 HMAC 亂數、
+ * 首次保護判定）來自 `@mining/game-engine`，與正式結算是同一份程式碼。
+ * 本檔只保留參考玩家策略、時間推進、Monte Carlo 與報表（與正式結算的差異見 GBS §23）。
  *
- * 執行（Node 22.18+ 可直接執行 TypeScript，不需安裝套件）：
- *   node scripts/balance-sim.ts                        # 全部報表（v1.2 預設方案）
+ * 執行（Node 22.18+ 可直接執行 TypeScript；需要先 `pnpm install` 建立 workspace 連結）：
+ *   pnpm sim                                           # = node scripts/balance-sim.ts
+ *   node scripts/balance-sim.ts                        # 全部報表（v1.3 預設方案）
  *   node scripts/balance-sim.ts --only protection      # 首次寶物保護 A / B / C 比較
  *   node scripts/balance-sim.ts --only stress          # 防卡死：全部出售後的恢復時間
  *   node scripts/balance-sim.ts --only compare         # D12–D16 套用前後比較
  *   node scripts/balance-sim.ts --only collection      # 主線後回訪補齊收藏
  *
- * 方案參數（預設值 = GBS v1.2）：
+ * 方案參數（預設值 = GBS v1.3；非預設值只用於比較方案，經由引擎的 DropRules 傳入）：
  *   --runs 1000              Monte Carlo 次數（玩家類型）
  *   --prot-runs 4000         首次保護比較的次數（P99 需要較多樣本）
- *   --seed 1                 第 i 次模擬的種子 = seed × 100003 + i（各方案共用同一組種子）
+ *   --seed 1                 第 i 次模擬的種子 = seed × 100003 + i（各方案共用同一組種子）；
+ *                            該次模擬的 rngSecret = SHA-256("balance-sim:" + 種子)
  *   --protect 4              D17 / D18 首次保護觸發的有效挖掘小時（預設 4）；none = 方案 A
  *   --revisit-coin-mult 0.5  D12
  *   --revisit-treasure-mult 0.5  D14（MVP 暫定）
@@ -28,155 +31,87 @@
  *   --json out.json          另存原始結果
  */
 
-// 1. 亂數（sfc32；正式引擎使用 HMAC 逐方塊種子，見 TECHNICAL_SPEC §6）
+// 1. 共用資料與引擎（packages/game-data、packages/game-engine）
+// ============================================================================
+//
+// 遊戲規則（深度、門檻、數值聚合、工作量、四層掉落、逐方塊亂數、首次保護判定）全部來自共用引擎，
+// 本檔只保留：參考玩家策略、時間推進（線上 / 離線 / 12 小時上限）、Monte Carlo 與報表。
+
+import * as GD from "@mining/game-data";
+import {
+  type BlockDrops,
+  DEFAULT_DROP_RULES,
+  type DropRules,
+  type FirstTreasureStatus,
+  type HeldArtifacts,
+  type MiningSpot,
+  type RandomSource,
+  type Stats as EngineStats,
+  advanceWork,
+  canMine,
+  computeStats,
+  createBlockRng,
+  expectedBlock,
+  firstTreasureStep,
+  frontierBlock,
+  frontierSpot,
+  requiredPower10OfBand,
+  revisitSpot,
+  revisitableZones,
+  reworkBand,
+  reworkSpot,
+  rollBlock as engineRollBlock,
+  sha256,
+  spotBlockMs,
+  workRate,
+  zoneOfBand as engineZoneOfBand,
+} from "@mining/game-engine";
+
+// ============================================================================
+// 2. 遊戲資料的檢視（只轉換格式，數值全部來自 @mining/game-data）
 // ============================================================================
 
-type Rng = () => number; // [0, 1)
+const BLOCKS_PER_ZONE = GD.BLOCKS_PER_ZONE;
+const TOTAL_BLOCKS = GD.TOTAL_BLOCKS;
 
-function makeRng(seed: number): Rng {
-  let a = 0x9e3779b9 ^ seed;
-  let b = 0x243f6a88 ^ (seed * 31);
-  let c = 0xb7e15162 ^ (seed * 131);
-  let d = 0xdeadbeef ^ (seed * 1031);
-  const next = (): number => {
-    a |= 0; b |= 0; c |= 0; d |= 0;
-    const t = (((a + b) | 0) + d) | 0;
-    d = (d + 1) | 0;
-    a = b ^ (b >>> 9);
-    b = (c + (c << 3)) | 0;
-    c = (c << 21) | (c >>> 11);
-    c = (c + t) | 0;
-    return (t >>> 0) / 4294967296;
-  };
-  for (let i = 0; i < 20; i++) next();
-  return next;
-}
+interface Pickaxe { id: string; key: GD.PickaxeId; coins: number; mats: Record<string, number> }
 
-function pickWeighted<T extends { w: number }>(rng: Rng, table: readonly T[]): T {
-  const total = table.reduce((s, e) => s + e.w, 0);
-  let u = rng() * total;
-  for (const e of table) {
-    u -= e.w;
-    if (u < 0) return e;
-  }
-  return table[table.length - 1];
-}
-
-// ============================================================================
-// 2. 遊戲資料（GBS v1.2）
-// ============================================================================
-
-const BLOCKS_PER_ZONE = 1000;
-const TOTAL_BLOCKS = 3000;
-
-/** GBS §5：每 10m（100 方塊）一個 Hardness */
-const HARDNESS = [
-  15, 35, 85, 210, 490, 820, 950, 1100, 1300, 1500,
-  1750, 2150, 2600, 3100, 3800, 4650, 5850, 7300, 9200, 11500,
-  14000, 16500, 19000, 22500, 26500, 29000, 30000, 31000, 31500, 32500,
-];
-
-/** GBS §5.1：每 50m（500 方塊）一個 RequiredPower，×10 定點 */
-const REQ_POWER10 = [10, 40, 90, 160, 270, 360];
-
-interface Pickaxe {
-  id: string;
-  power10: number;
-  speed1000: number;
-  luckPpm: number;
-  coins: number;
-  mats: Record<string, number>;
-  upgradeBase: number;
-}
-
-/** GBS §10 */
-const PICKAXES: Pickaxe[] = [
-  { id: "wood", power10: 20, speed1000: 1000, luckPpm: 0, coins: 0, mats: {}, upgradeBase: 40 },
-  { id: "stone", power10: 50, speed1000: 1200, luckPpm: 10_000, coins: 200, mats: { stone: 40 }, upgradeBase: 250 },
-  { id: "iron", power10: 100, speed1000: 1500, luckPpm: 30_000, coins: 2_000, mats: { iron_ingot: 8 }, upgradeBase: 800 },
-  { id: "gold", power10: 180, speed1000: 1800, luckPpm: 70_000, coins: 8_000, mats: { iron_ingot: 12, refined_crystal: 4 }, upgradeBase: 2_500 },
-  { id: "diamond", power10: 300, speed1000: 2200, luckPpm: 120_000, coins: 15_000, mats: { refined_crystal: 10, reinforce_stone: 10 }, upgradeBase: 20_000 },
-];
-const UPGRADE_K = 1.8;
+/** GBS §10。報表沿用舊的短名稱（wood / stone / …） */
+const PICKAXES: Pickaxe[] = GD.PICKAXES.map((p) => ({
+  id: p.id.replace("pick_", ""),
+  key: p.id,
+  coins: p.purchase?.coins ?? 0,
+  mats: { ...(p.purchase?.items ?? {}) } as Record<string, number>,
+}));
 
 function upgradeCost(tier: number, toLevel: number): { coins: number; mats: Record<string, number> } {
-  const coins = Math.round((PICKAXES[tier].upgradeBase * UPGRADE_K ** (toLevel - 2)) / 10) * 10;
-  return { coins, mats: { reinforce_stone: toLevel - 1 } };
+  const c = GD.PICKAXES[tier as 0 | 1 | 2 | 3 | 4].upgrades[toLevel - 2];
+  return { coins: c.coins, mats: { ...c.items } as Record<string, number> };
 }
 
 /** GBS §8.1 */
-const PRICE: Record<string, number> = {
-  stone: 1, coal: 3, copper: 6, iron_ore: 8, silver: 35, gold: 90,
-  amethyst: 50, sapphire: 150, ruby: 500,
-};
+const PRICE: Record<string, number> = Object.fromEntries(Object.values(GD.MINERALS).map((m) => [m.id, m.sellPrice]));
 
 /** GBS §8.2 */
-const RECIPES: Record<string, Record<string, number>> = {
-  iron_ingot: { iron_ore: 5, coal: 2 },
-  reinforce_stone: { stone: 20, iron_ore: 5 },
-  refined_crystal: { amethyst: 3 },
-};
+const RECIPES: Record<string, Record<string, number>> = Object.fromEntries(
+  Object.values(GD.MATERIALS).map((m) => [m.id, { ...m.recipe } as Record<string, number>]),
+);
 
-interface Zone {
-  id: string;
-  unlockFee: number;
-  ore: { item: string; w: number }[];
-  /** 第二層：每方塊礦物判定 */
-  bundleChance: number;
-  bundleSize: number;
-  rareChance: number;
-  rare: { item: string; w: number; qty: number }[];
-  /** 第三層：每方塊金幣判定；金額依 50m 門檻段（每區兩段），實際為 [0.5×, 1.5×] 的均勻整數 */
-  coinChance: number;
-  coinAvgBySeg: [number, number];
-  /** 第四層：時間型寶物機會（每小時） */
-  treasurePerHour: number;
-  epics: string[];
-  legendary: string;
-  epicValue: number;
-  legendaryValue: number;
-  set: { speedPct: number; luckPpm: number };
-}
+interface Zone { id: string; unlockFee: number; epics: string[]; legendary: string; epicValue: number }
 
-/** GBS §6–§9 */
-const ZONES: Zone[] = [
-  {
-    id: "zone1", unlockFee: 0,
-    ore: [{ item: "stone", w: 60 }, { item: "coal", w: 15 }, { item: "copper", w: 13 }, { item: "iron_ore", w: 12 }],
-    bundleChance: 0.15, bundleSize: 3,
-    rareChance: 0.025, rare: [{ item: "silver", w: 50, qty: 1 }, { item: "amethyst", w: 50, qty: 1 }],
-    coinChance: 0.10, coinAvgBySeg: [20, 20],
-    treasurePerHour: 0.35, epics: ["a_z1_lantern", "a_z1_badge", "a_z1_map"], legendary: "a_z1_heart",
-    epicValue: 300, legendaryValue: 3_000, set: { speedPct: 3, luckPpm: 0 },
-  },
-  {
-    id: "zone2", unlockFee: 800,
-    ore: [{ item: "stone", w: 55 }, { item: "iron_ore", w: 15 }, { item: "silver", w: 30 }],
-    bundleChance: 0.15, bundleSize: 3,
-    rareChance: 0.035, rare: [{ item: "amethyst", w: 65, qty: 2 }, { item: "sapphire", w: 35, qty: 1 }],
-    coinChance: 0.10, coinAvgBySeg: [150, 330],
-    treasurePerHour: 0.25, epics: ["a_z2_orb", "a_z2_crown", "a_z2_mural"], legendary: "a_z2_heart",
-    epicValue: 2_000, legendaryValue: 20_000, set: { speedPct: 0, luckPpm: 20_000 },
-  },
-  {
-    id: "zone3", unlockFee: 3_000,
-    ore: [{ item: "stone", w: 50 }, { item: "silver", w: 15 }, { item: "gold", w: 35 }],
-    bundleChance: 0.15, bundleSize: 3,
-    rareChance: 0.05, rare: [{ item: "sapphire", w: 50, qty: 2 }, { item: "ruby", w: 50, qty: 1 }],
-    coinChance: 0.10, coinAvgBySeg: [1_100, 1_400],
-    treasurePerHour: 0.175, epics: ["a_z3_emblem", "a_z3_ring", "a_z3_tablet"], legendary: "a_z3_crown",
-    epicValue: 6_000, legendaryValue: 60_000, set: { speedPct: 3, luckPpm: 20_000 },
-  },
-];
-
+const ZONES: Zone[] = GD.ZONES.map((z) => ({
+  id: z.id,
+  unlockFee: z.unlockFee,
+  epics: [...z.epics],
+  legendary: z.legendary,
+  epicValue: GD.ARTIFACTS[z.epics[0]].baseValue,
+}));
 
 const LEGENDARY_IDS = new Set(ZONES.map((z) => z.legendary));
 const ALL_ARTIFACTS = ZONES.flatMap((z) => [...z.epics, z.legendary]);
-const LEGENDARY_SHARE = 0.10;      // GDD §4.1：Epic 4.5% : Legendary 0.5% = 9 : 1
-const TREASURE_CHANCE_CAP = 0.5;   // 每方塊寶物機會上限
-const OFFLINE_CAP_S = 12 * 3600;   // D9
-const PROTECTED_EPIC = "a_z1_lantern"; // D17：首次保護發放的固定 Epic（GBS §7.5）
-const FLAT_COIN_AVG = [20, 220, 1_250]; // D13 之前每區固定的金幣平均（僅供 --flat-coins）
+const OFFLINE_CAP_S = GD.OFFLINE_CAP_MS / 1000; // D9
+/** D13 之前每區固定的金幣平均（僅供 --flat-coins 比較；依門檻段展開） */
+const FLAT_COIN_AVG_BY_SEGMENT = [20, 20, 220, 220, 1_250, 1_250];
 
 /** 參考玩家保留的製作素材（超過的部分出售） */
 const KEEP: Record<string, number> = { stone: 300, coal: 40, iron_ore: 120 };
@@ -252,13 +187,16 @@ interface Player {
   revisitZone: number;
   reworkBand: number;
   collectTarget: number;     // 主線後補收藏的目標礦區（-1 = 無）
-  work: number;
-  blockSec: number;
+  work: number;              // 目前方塊的累積工作量（引擎 advanceWork；P5）
+  blockMs: number;           // 目前方塊已挖掘的毫秒數
   held: Record<string, number>;
   found: Record<string, number>;
+  // 逐方塊亂數（TECHNICAL_SPEC §6.2）：每次模擬各自一把密鑰，digCounter 由所有模式共用
+  blockRng: (digCounter: number) => RandomSource;
+  digCounter: number;
   // D17
-  first: "pending" | "obtained" | "granted";
-  effSec: number;            // 首次保護用的有效挖掘秒數（已完成方塊）
+  first: FirstTreasureStatus;
+  effMs: number;             // 首次保護用的有效挖掘毫秒數（已完成方塊）
   firstMining: number;       // 第一件寶物時的挖掘秒數
   firstCal: number;          // 第一件寶物時的日曆秒數
   // 紀錄
@@ -279,11 +217,15 @@ interface Player {
   events: string[];
 }
 
-function newPlayer(): Player {
+const utf8 = new TextEncoder();
+
+/** 每次模擬的 rngSecret = SHA-256("balance-sim:" + seed)，重現性與舊版相同（同 seed → 同結果） */
+function newPlayer(seed: number): Player {
   return {
     t: 0, miningSec: 0, coins: 0, inv: {}, tier: 0, levels: [1, 1, 1, 1, 1], unlocked: 0, frontier: 0,
-    mode: "frontier", revisitZone: 0, reworkBand: 0, collectTarget: -1, work: 0, blockSec: 0, held: {}, found: {},
-    first: "pending", effSec: 0, firstMining: Infinity, firstCal: Infinity,
+    mode: "frontier", revisitZone: 0, reworkBand: 0, collectTarget: -1, work: 0, blockMs: 0, held: {}, found: {},
+    blockRng: createBlockRng(sha256(utf8.encode(`balance-sim:${seed}`))), digCounter: 0,
+    first: "pending", effMs: 0, firstMining: Infinity, firstCal: Infinity,
     zoneDoneAt: [], zoneDoneMining: [], zoneCoins: [0, 0, 0], grossCoins: 0, setDoneAtExit: [], treasureAtZone1Exit: false,
     zoneEpics: [0, 0, 0], zoneLegs: [0, 0, 0], normalTreasures: 0, legendaries: 0, treasureTimes: [], buy: [],
     modeSec: { frontier: 0, revisit: 0, rework: 0 }, blockedWasteSec: 0, events: [],
@@ -294,30 +236,16 @@ function add(rec: Record<string, number>, k: string, n: number) {
   rec[k] = (rec[k] ?? 0) + n;
 }
 
-function setActive(p: Player, z: number): boolean {
-  return ZONES[z].epics.every((id) => (p.held[id] ?? 0) > 0);
+type ZoneIndex = 0 | 1 | 2;
+type Stats = EngineStats;
+
+/** GBS §3（引擎 computeStats：定點數、套組需實際持有） */
+function stats(p: Player, tier = p.tier, level = p.levels[tier]): Stats {
+  return computeStats(PICKAXES[tier].key, level, p.held as HeldArtifacts);
 }
 
-/** GBS §3.1（定點數，對應 TECHNICAL_SPEC §5） */
-function stats(p: Player, tier = p.tier, level = p.levels[tier]) {
-  const pk = PICKAXES[tier];
-  const step = level - 1;
-  let speedPct = 0;
-  let luckBonus = 0;
-  for (let z = 0; z < 3; z++) {
-    if (setActive(p, z)) { speedPct += ZONES[z].set.speedPct; luckBonus += ZONES[z].set.luckPpm; }
-  }
-  const power10 = (pk.power10 * (100 + 10 * step)) / 100;
-  const speed1000 = Math.floor(((pk.speed1000 * (100 + 5 * step)) / 100) * (100 + speedPct) / 100);
-  const luckPpm = (pk.luckPpm * (100 + 10 * step)) / 100 + luckBonus;
-  return { power10, speed1000, luck: luckPpm / 1e6 };
-}
-type Stats = ReturnType<typeof stats>;
-
-const zoneOfBand = (b: number) => Math.floor(b / 10);
-const segOfBand = (b: number) => Math.floor(b / 5);
-const hardnessAt = (b: number) => Math.round(HARDNESS[b] * CFG.hardnessScale);
-const reqAt = (b: number) => REQ_POWER10[segOfBand(b)];
+const zoneOfBand = (b: number): ZoneIndex => engineZoneOfBand(b);
+const reqAt = (b: number) => requiredPower10OfBand(b);
 
 /** 一個挖掘位置：前線 / 回訪（礦區最深帶）/ 重挖（指定深度帶） */
 interface Spot { band: number; mode: Mode }
@@ -327,78 +255,68 @@ function spotOf(p: Player): Spot {
   if (p.mode === "revisit") return { band: p.revisitZone * 10 + 9, mode: "revisit" };
   return { band: p.reworkBand, mode: "rework" };
 }
-const coinMult = (m: Mode) => (m === "revisit" ? CFG.revisitCoinMult : m === "rework" ? CFG.reworkCoinMult : 1);
-const treasureMultOf = (m: Mode) => (m === "revisit" ? CFG.revisitTreasureMult : m === "rework" ? CFG.reworkTreasureMult : 1);
 
-function coinAvg(spot: Spot): number {
-  const z = zoneOfBand(spot.band);
-  const base = CFG.flatCoins ? FLAT_COIN_AVG[z] : ZONES[z].coinAvgBySeg[segOfBand(spot.band) % 2];
-  return base * coinMult(spot.mode); // D12：只作用於第三層金幣
+/** 轉成引擎的 MiningSpot。--hardness-scale（D11 探索用，預設 1）只在這裡套用 */
+function engineSpot(spot: Spot): MiningSpot {
+  const base =
+    spot.mode === "frontier" ? frontierSpot(spot.band * 100)
+    : spot.mode === "revisit" ? revisitSpot(zoneOfBand(spot.band))
+    : reworkSpot(spot.band);
+  if (base.band !== spot.band) throw new Error(`spot mismatch: ${JSON.stringify(spot)}`);
+  return CFG.hardnessScale === 1 ? base : { ...base, hardness: Math.round(base.hardness * CFG.hardnessScale) };
 }
-const treasureMult = (spot: Spot) => treasureMultOf(spot.mode); // D14
+
+const toPpm = (x: number) => Math.round(x * 1_000_000);
+
+/** 方案參數 → 引擎的 DropRules（預設值 = GBS v1.3 = DEFAULT_DROP_RULES）。依 CFG 快取 */
+let rulesCache: { cfg: Config; rules: DropRules; id: number } | null = null;
+let rulesId = 0;
+function dropRules(): DropRules {
+  if (rulesCache?.cfg === CFG) return rulesCache.rules;
+  const rules: DropRules = {
+    coinModeMultiplierPpm: { frontier: 1_000_000, revisit: toPpm(CFG.revisitCoinMult), rework: toPpm(CFG.reworkCoinMult) },
+    treasureModeMultiplierPpm: { frontier: 1_000_000, revisit: toPpm(CFG.revisitTreasureMult), rework: toPpm(CFG.reworkTreasureMult) },
+    ...(CFG.flatCoins ? { coinAvgBySegment: FLAT_COIN_AVG_BY_SEGMENT } : {}),
+  };
+  const resolved = JSON.stringify(rules) === JSON.stringify(DEFAULT_DROP_RULES) ? DEFAULT_DROP_RULES : rules;
+  rulesCache = { cfg: CFG, rules: resolved, id: ++rulesId };
+  return resolved;
+}
 
 interface Drops { items: Record<string, number>; coins: number; artifacts: string[] }
 
-/** GBS §7：四層判定。亂數消耗順序與 TECHNICAL_SPEC §6.2 相同 */
-function rollBlock(rng: Rng, spot: Spot, sec: number, luck: number): Drops {
-  const zone = ZONES[zoneOfBand(spot.band)];
-  const d: Drops = { items: {}, coins: 0, artifacts: [] };
-  // 第一層：基礎產出
-  add(d.items, pickWeighted(rng, zone.ore).item, 1);
-  // 第二層：礦物判定
-  const pRare = zone.rareChance * (1 + luck);
-  const u2 = rng();
-  if (u2 < zone.bundleChance) {
-    for (let k = 0; k < zone.bundleSize; k++) add(d.items, pickWeighted(rng, zone.ore).item, 1);
-  } else if (u2 < zone.bundleChance + pRare) {
-    const r = pickWeighted(rng, zone.rare);
-    add(d.items, r.item, r.qty);
-  }
-  // 第三層：金幣判定
-  if (rng() < zone.coinChance) {
-    const avg = coinAvg(spot);
-    const lo = Math.round(avg * 0.5);
-    const hi = Math.round(avg * 1.5);
-    d.coins += lo + Math.floor(rng() * (hi - lo + 1));
-  }
-  // 第四層：寶物機會
-  const chance = Math.min(TREASURE_CHANCE_CAP, (zone.treasurePerHour * sec * treasureMult(spot)) / 3600);
-  const pLeg = chance * LEGENDARY_SHARE * (1 + luck);
-  const pEpic = chance * (1 - LEGENDARY_SHARE) * (1 + luck);
-  const u4 = rng();
-  if (u4 < pLeg) d.artifacts.push(zone.legendary);
-  else if (u4 < pLeg + pEpic) d.artifacts.push(zone.epics[Math.floor(rng() * zone.epics.length)]);
-  return d;
+/** GBS §7：四層判定由引擎執行（亂數消耗順序見 TECHNICAL_SPEC §6.2） */
+function rollBlock(p: Player, spot: Spot, blockMs: number, luckPpm: number): Drops {
+  const d: BlockDrops = engineRollBlock(p.blockRng(p.digCounter), engineSpot(spot), blockMs, luckPpm, dropRules());
+  p.digCounter += 1;
+  return { items: { ...d.items } as Record<string, number>, coins: d.coins, artifacts: d.artifact ? [d.artifact] : [] };
 }
 
-// ---------- 期望值 ----------
-
-function blockSeconds(hardness: number, s: Stats): number {
-  return Math.ceil((hardness * 1e7) / (s.power10 * s.speed1000)) / 1000;
-}
+// ---------- 期望值（引擎 expectedBlock；只供參考玩家做決策與報表） ----------
 
 interface Rates { sec: number; blocksPerHour: number; oresPerHour: number; raresPerHour: number; coinsPerHour: number; treasuresPerHour: number; legendaryPerHour: number; valuePerHour: number; itemsPerHour: Record<string, number> }
 
+/** 決策每個方塊都會查詢；結果只取決於位置、數值與方案，依此快取 */
+const ratesCache = new Map<string, Rates>();
 function expectedRates(spot: Spot, s: Stats): Rates {
-  const z = zoneOfBand(spot.band);
-  const zone = ZONES[z];
-  const sec = blockSeconds(hardnessAt(spot.band), s);
-  const bph = 3600 / sec;
+  const key = `${spot.band}|${spot.mode}|${s.power10}|${s.speed1000}|${s.luckPpm}|${(dropRules(), rulesCache!.id)}|${CFG.hardnessScale}`;
+  let r = ratesCache.get(key);
+  if (!r) { r = computeRates(spot, s); ratesCache.set(key, r); }
+  return r;
+}
+
+function computeRates(spot: Spot, s: Stats): Rates {
+  const es = engineSpot(spot);
+  const ms = spotBlockMs(es, s);
+  const e = expectedBlock(es, ms, s.luckPpm, dropRules());
+  const bph = 3_600_000 / ms;
   const items: Record<string, number> = {};
-  const wOre = zone.ore.reduce((a, e) => a + e.w, 0);
-  const oresPerBlock = 1 + zone.bundleChance * zone.bundleSize;
-  for (const e of zone.ore) add(items, e.item, (e.w / wOre) * oresPerBlock * bph);
-  const pRare = zone.rareChance * (1 + s.luck);
-  const wRare = zone.rare.reduce((a, e) => a + e.w, 0);
-  for (const e of zone.rare) add(items, e.item, pRare * (e.w / wRare) * e.qty * bph);
-  const coins = zone.coinChance * coinAvg(spot) * bph;
-  const chance = Math.min(TREASURE_CHANCE_CAP, (zone.treasurePerHour * sec * treasureMult(spot)) / 3600);
-  const tph = bph * chance * (1 + s.luck);
-  let value = coins;
+  for (const [k, n] of Object.entries(e.items)) add(items, k, n * bph);
+  let value = e.coins * bph;
   for (const [k, n] of Object.entries(items)) value += n * PRICE[k];
   return {
-    sec, blocksPerHour: bph, oresPerHour: oresPerBlock * bph, raresPerHour: pRare * bph, coinsPerHour: coins,
-    treasuresPerHour: tph, legendaryPerHour: tph * LEGENDARY_SHARE, valuePerHour: value, itemsPerHour: items,
+    sec: ms / 1000, blocksPerHour: bph, oresPerHour: e.ores * bph, raresPerHour: e.rares * bph, coinsPerHour: e.coins * bph,
+    treasuresPerHour: e.treasures * bph, legendaryPerHour: e.legendaries * bph, valuePerHour: value, itemsPerHour: items,
   };
 }
 
@@ -455,17 +373,16 @@ function sellExcess(p: Player) {
   }
 }
 
+/** GBS §4.2、§12（引擎 frontierBlock）。主線完成不算卡關 */
 function frontierBlocked(p: Player): "power" | "unlock" | null {
-  if (p.frontier >= TOTAL_BLOCKS) return null;
-  const z = Math.floor(p.frontier / 1000);
-  if (z > p.unlocked) return "unlock";
-  return stats(p).power10 < REQ_POWER10[Math.floor(p.frontier / 500)] ? "power" : null;
+  const b = frontierBlock(p.frontier, p.unlocked as ZoneIndex, stats(p).power10);
+  return b === "power" ? "power" : b === "locked" ? "unlock" : null;
 }
 
 /** 解除目前卡關所需要的金幣與素材 */
 function goalFor(p: Player, blocked: "power" | "unlock"): { coins: number; mats: Record<string, number> } {
   if (blocked === "unlock") return { coins: ZONES[Math.floor(p.frontier / 1000)].unlockFee, mats: {} };
-  const req = REQ_POWER10[Math.floor(p.frontier / 500)];
+  const req = reqAt(Math.floor(p.frontier / 100));
   if (stats(p, p.tier, 5).power10 >= req && p.levels[p.tier] < 5) return upgradeCost(p.tier, p.levels[p.tier] + 1);
   const nx = PICKAXES[p.tier + 1];
   return { coins: nx.coins, mats: nx.mats };
@@ -473,16 +390,13 @@ function goalFor(p: Player, blocked: "power" | "unlock"): { coins: number; mats:
 
 /** GBS §2.3（D15）：只能回訪比前線所在礦區淺、且已解鎖的礦區；主線完成後可回訪全部 */
 function revisitAllowed(p: Player, z: number): boolean {
-  if (p.frontier >= TOTAL_BLOCKS) return true;
-  return z < Math.floor(p.frontier / 1000) && z <= p.unlocked;
+  return revisitableZones(p.frontier, p.unlocked as ZoneIndex).includes(z as ZoneIndex);
 }
 
-/** GBS §2.5（D16）：重挖目標 = 目前裝備能挖的最深已探索深度帶。前線未卡關時不可用 */
+/** GBS §2.4（D16，引擎 reworkBand）：重挖目標 = 目前裝備能挖的最深已探索深度帶。前線未卡關時不可用 */
 function reworkBandFor(p: Player): number {
-  if (!CFG.rework || p.frontier === 0 || !frontierBlocked(p)) return -1;
-  const pw = stats(p).power10;
-  for (let b = Math.floor((p.frontier - 1) / 100); b >= 0; b--) if (reqAt(b) <= pw) return b;
-  return -1;
+  if (!CFG.rework) return -1;
+  return reworkBand(p.frontier, p.unlocked as ZoneIndex, stats(p).power10) ?? -1;
 }
 
 /** 卡關時選擇恢復方式：在可用的重挖與回訪中，選「湊齊目標」期望時間最短的 */
@@ -508,7 +422,7 @@ function chooseRecovery(p: Player, blocked: "power" | "unlock"): { mode: Mode; z
 
 function switchMode(p: Player, mode: Mode, zone: number, band: number) {
   if (p.mode === mode && p.revisitZone === zone && p.reworkBand === band) return;
-  p.mode = mode; p.revisitZone = zone; p.reworkBand = band; p.work = 0; p.blockSec = 0; // GBS §2.4：進度歸零
+  p.mode = mode; p.revisitZone = zone; p.reworkBand = band; p.work = 0; p.blockMs = 0; // GBS §2.6（P3）：進度歸零
 }
 
 /** 玩家在線時的決策 */
@@ -535,13 +449,13 @@ function decide(p: Player) {
     if (lv < 5) {
       const cost = upgradeCost(p.tier, lv + 1);
       const blocked = frontierBlocked(p);
-      const upgradeUnblocks = blocked === "power" && stats(p, p.tier, 5).power10 >= REQ_POWER10[Math.floor(p.frontier / 500)];
+      const upgradeUnblocks = blocked === "power" && stats(p, p.tier, 5).power10 >= reqAt(Math.floor(p.frontier / 100));
       let reserve = 0;
       if (!upgradeUnblocks) {
         if (p.tier < 4) {
           const s5 = stats(p, p.tier, 5);
           for (let seg = Math.floor(p.frontier / 500); seg < 6; seg++) {
-            if (REQ_POWER10[seg] > s5.power10) {
+            if (GD.SEGMENT_REQUIRED_POWER10[seg] > s5.power10) {
               const dist = seg * 500 - p.frontier;
               reserve += PICKAXES[p.tier + 1].coins * Math.max(0, Math.min(1, 1 - dist / 400));
               break;
@@ -591,7 +505,7 @@ function claim(p: Player, r: Report) {
  * 推進到 tEnd。online：每個方塊後由玩家決策、獎勵立即入帳。
  * offline：獎勵累積到報告；前線遇到門檻即停止（D5）；回訪 / 重挖依玩家離線前的選擇繼續。
  */
-function advance(p: Player, tEnd: number, online: boolean, rng: Rng, report: Report | null): boolean {
+function advance(p: Player, tEnd: number, online: boolean, report: Report | null): boolean {
   while (p.t < tEnd - 1e-9) {
     if (p.mode === "frontier" && p.frontier >= TOTAL_BLOCKS) return true;
     if (p.mode === "frontier" && frontierBlocked(p)) {
@@ -603,36 +517,39 @@ function advance(p: Player, tEnd: number, online: boolean, rng: Rng, report: Rep
     }
     if (p.mode !== "frontier" && online && p.collectTarget < 0 && !frontierBlocked(p)) { decide(p); continue; }
     const spot = spotOf(p);
+    const es = engineSpot(spot);
     const s = stats(p);
-    if (s.power10 < reqAt(spot.band)) { p.blockedWasteSec += tEnd - p.t; p.t = tEnd; return false; }
-    const rate = s.power10 * s.speed1000;
-    const ms = Math.ceil((hardnessAt(spot.band) * 1e7 - p.work) / rate);
-    const remain = (tEnd - p.t) * 1000;
-    if (ms > remain) {
-      p.work += rate * remain; p.blockSec += remain / 1000; p.miningSec += remain / 1000;
-      p.modeSec[p.mode] += remain / 1000; p.t = tEnd;
+    if (!canMine(s.power10, es.requiredPower10)) { p.blockedWasteSec += tEnd - p.t; p.t = tEnd; return false; }
+    // 時間以整數毫秒推進（TECHNICAL_SPEC §5）；工作量由引擎累積（P5：換裝備保留進度）
+    const availMs = Math.max(0, Math.round((tEnd - p.t) * 1000));
+    const step = advanceWork(p.work, es.hardness, workRate(s), availMs);
+    const sec = step.usedMs / 1000;
+    p.blockMs += step.usedMs; p.miningSec += sec; p.modeSec[p.mode] += sec;
+    if (!step.completed) {
+      p.work = step.work; p.t = tEnd;
       return false;
     }
-    const sec = ms / 1000;
-    p.t += sec; p.miningSec += sec; p.blockSec += sec; p.modeSec[p.mode] += sec;
-    const drops = rollBlock(rng, spot, p.blockSec, s.luck);
-    // D17：有效挖掘時間只累積「已完成方塊」的挖掘秒數（所有模式；卡關、閒置、超過離線上限都不累積）
-    p.effSec += p.blockSec;
+    p.t += sec;
+    const drops = rollBlock(p, spot, p.blockMs, s.luckPpm);
     const z = zoneOfBand(spot.band);
-    if (drops.artifacts.length > 0) {
-      if (p.first === "pending") { p.first = "obtained"; p.firstMining = p.miningSec; p.firstCal = p.t; }
-      for (const a of drops.artifacts) {
-        p.normalTreasures++;
-        if (LEGENDARY_IDS.has(a)) { p.legendaries++; p.zoneLegs[z]++; } else p.zoneEpics[z]++;
-        p.treasureTimes.push(p.miningSec);
-      }
-    } else if (p.first === "pending" && CFG.protectHours !== null && p.effSec >= CFG.protectHours * 3600) {
-      drops.artifacts.push(PROTECTED_EPIC); // 固定 Epic，不消耗亂數
-      p.first = "granted"; p.firstMining = p.miningSec; p.firstCal = p.t;
+    // D17：有效挖掘時間只累積「已完成方塊」的挖掘時間（所有模式；卡關、閒置、超過離線上限都不累積）
+    const dropped = drops.artifacts[0] ?? null;
+    const prot = CFG.protectHours === null
+      ? { status: (dropped && p.first === "pending" ? "obtained" : p.first) as FirstTreasureStatus, effectiveMs: p.effMs + p.blockMs, granted: null }
+      : firstTreasureStep(p.first, p.effMs, p.blockMs, dropped as GD.ArtifactId | null, Math.round(CFG.protectHours * 3_600_000));
+    if (p.first === "pending" && prot.status !== "pending") { p.firstMining = p.miningSec; p.firstCal = p.t; }
+    p.first = prot.status; p.effMs = prot.effectiveMs;
+    for (const a of drops.artifacts) {
+      p.normalTreasures++;
+      if (LEGENDARY_IDS.has(a)) { p.legendaries++; p.zoneLegs[z]++; } else p.zoneEpics[z]++;
+      p.treasureTimes.push(p.miningSec);
+    }
+    if (prot.granted) {
+      drops.artifacts.push(prot.granted); // 固定 Epic，不消耗亂數
       p.zoneEpics[0]++; p.treasureTimes.push(p.miningSec);
     }
     for (const a of drops.artifacts) if (!(a in p.found)) p.found[a] = p.t;
-    p.work = 0; p.blockSec = 0;
+    p.work = 0; p.blockMs = 0;
     if (online) applyDrops(p, drops);
     else if (report) {
       for (const [k, n] of Object.entries(drops.items)) add(report.items, k, n);
@@ -668,10 +585,9 @@ const PROFILES: Profile[] = [
 const seedOf = (i: number) => CFG.seed * 100_003 + i;
 
 function runOnce(seed: number, profile: Profile): Player {
-  const rng = makeRng(seed);
-  const p = newPlayer();
+  const p = newPlayer(seed);
   decide(p);
-  if (profile.logins.length === 0) { advance(p, 400 * 3600, true, rng, null); return p; }
+  if (profile.logins.length === 0) { advance(p, 400 * 3600, true, null); return p; }
   const loginsAbs: number[] = [];
   for (let day = 0; day < 60; day++) for (const h of profile.logins) loginsAbs.push((day * 24 + h - profile.logins[0]) * 3600);
   let report: Report | null = null;
@@ -680,10 +596,10 @@ function runOnce(seed: number, profile: Profile): Player {
     if (report) { claim(p, report); report = null; }
     decide(p);
     const onlineEnd = loginsAbs[i] + profile.sessionMin * 60;
-    if (advance(p, onlineEnd, true, rng, null)) return p;
+    if (advance(p, onlineEnd, true, null)) return p;
     const offlineEnd = Math.min(loginsAbs[i + 1], onlineEnd + OFFLINE_CAP_S);
     report = { coins: 0, items: {}, artifacts: [] };
-    if (advance(p, offlineEnd, false, rng, report)) { claim(p, report); return p; }
+    if (advance(p, offlineEnd, false, report)) { claim(p, report); return p; }
     p.t = loginsAbs[i + 1]; // 超過 12 小時上限的時間不產生收益（D9），也不算卡關閒置
   }
   return p;
@@ -691,10 +607,9 @@ function runOnce(seed: number, profile: Profile): Player {
 
 /** 主線完成後，持續在線回訪補齊收藏（D14）。回傳補齊時間（挖掘小時，從主線完成起算） */
 function runCollection(seed: number) {
-  const rng = makeRng(seed);
-  const p = newPlayer();
+  const p = newPlayer(seed);
   decide(p);
-  advance(p, 400 * 3600, true, rng, null);
+  advance(p, 400 * 3600, true, null);
   const start = p.miningSec;
   const coinsStart = p.grossCoins;
   const missingEpic = (z: number) => ZONES[z].epics.some((id) => !(id in p.found));
@@ -708,7 +623,7 @@ function runCollection(seed: number) {
     if (target === undefined) break;
     p.collectTarget = target;
     decide(p);
-    advance(p, p.t + 3600, true, rng, null);
+    advance(p, p.t + 3600, true, null);
     if (setsDone === Infinity && ![0, 1, 2].some(missingEpic)) setsDone = (p.miningSec - start) / 3600;
     if (ALL_ARTIFACTS.every((a) => a in p.found)) codexDone = (p.miningSec - start) / 3600;
   }
@@ -729,12 +644,11 @@ const STRESS: Scenario[] = [
 
 /** 從「金幣 0、背包全空、寶物全賣」開始，到前線通過門檻所需的時間（持續在線） */
 function runStress(seed: number, sc: Scenario) {
-  const rng = makeRng(seed);
-  const p = newPlayer();
+  const p = newPlayer(seed);
   p.frontier = sc.frontier; p.tier = sc.tier; p.unlocked = sc.unlocked; p.first = "obtained";
   decide(p);
   const cap = 500 * 3600;
-  while (p.t < cap && p.frontier <= sc.frontier) advance(p, p.t + 600, true, rng, null);
+  while (p.t < cap && p.frontier <= sc.frontier) advance(p, p.t + 600, true, null);
   const passed = p.frontier > sc.frontier;
   return { hours: passed ? p.t / 3600 : Infinity, rework: p.modeSec.rework / 3600, revisit: p.modeSec.revisit / 3600 };
 }
@@ -859,7 +773,7 @@ function reportRevisit() {
   log();
   log("| 裝備 | 前線深度 | 前線 /h | 回訪 zone1 /h | 回訪 zone2 /h | 重挖 /h | 回訪最高比例 | 重挖比例 |");
   log("|---|---|---:|---:|---:|---:|---:|---:|");
-  const dummy = newPlayer();
+  const dummy = newPlayer(0);
   let worstRevisit = 0;
   let worstRework = 0;
   const grid: unknown[] = [];
@@ -930,7 +844,7 @@ function reportSpeed() {
   log();
   log("| 位置 | 裝備 | 方塊 /h | 礦物 /h | Rare /h | 金幣 /h | 寶物 /h |");
   log("|---|---|---:|---:|---:|---:|---:|");
-  const dummy = newPlayer();
+  const dummy = newPlayer(0);
   const cases: [string, number, number, number[]][] = [["zone1 80m", 7, 1, [1, 3, 5]], ["zone2 120m", 11, 2, [1, 3, 5]], ["zone2 170m", 16, 3, [1, 3, 5]], ["zone3 280m", 27, 4, [3, 4, 5]]];
   for (const [label, band, tier, lvs] of cases) for (const lv of lvs) {
     const r = expectedRates({ band, mode: "frontier" }, stats(dummy, tier, lv));

@@ -14,6 +14,7 @@
     "scripts/env-sync.ts",
     "scripts/verify-env.ts",
     "scripts/verify-hot-reload.ts",
-    "scripts/diagnose.ts"
+    "scripts/diagnose.ts",
+    "scripts/balance-sim.ts"
   ]
 }

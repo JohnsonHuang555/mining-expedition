@@ -23,6 +23,8 @@
     "sim": "node scripts/balance-sim.ts"
   },
   "devDependencies": {
+    "@mining/game-data": "workspace:*",
+    "@mining/game-engine": "workspace:*",
     "@types/node": "^22.19.0",
     "typescript": "5.9.3"
   }

@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@mining/game-data':
+        specifier: workspace:*
+        version: link:packages/game-data
+      '@mining/game-engine':
+        specifier: workspace:*
+        version: link:packages/game-engine
       '@types/node':
         specifier: ^22.19.0
         version: 22.20.5
