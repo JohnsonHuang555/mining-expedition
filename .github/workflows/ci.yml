@@ -28,11 +28,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
+      - name: Engine determinism (Node vs fixture)
+        run: node packages/game-engine/test/golden-cli.ts | diff -u packages/game-engine/test/fixtures/golden-v1.json -
+      - name: Balance simulator smoke run (shared engine)
+        run: node scripts/balance-sim.ts --runs 20 --only profiles
       - run: pnpm build
 
-  # Edge Function 以 Deno 型別檢查（含匯入 supabase/ 以外的 packages/）
+  # Edge Function 以 Deno 型別檢查（含匯入 supabase/ 以外的 packages/）；
+  # 引擎在 Deno 上的確定性快照必須與 Node（Vitest）使用的 fixture 完全相同
   edge-function:
-    name: deno check (Edge Functions)
+    name: deno check (Edge Functions) / engine determinism
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -41,6 +46,9 @@ jobs:
         with:
           deno-version: v2.x
       - run: deno check --config supabase/functions/health/deno.json supabase/functions/health/index.ts
+      - run: deno check --config packages/game-engine/deno.test.json packages/game-engine/src/index.ts packages/game-engine/test/golden-cli.ts
+      - name: Engine determinism (Deno vs fixture)
+        run: deno run --config packages/game-engine/deno.test.json packages/game-engine/test/golden-cli.ts | diff -u packages/game-engine/test/fixtures/golden-v1.json -
 
   # Docker-first 整合驗收：依 README 的步驟，在 Linux runner 上以開發容器啟動 Supabase Local。
   # 這驗證的是 Linux + Docker Engine，不代表 Docker Desktop（macOS / Windows）。
@@ -56,6 +64,8 @@ jobs:
         run: docker compose build
       - name: pnpm install (in dev container)
         run: docker compose run --rm -T dev pnpm install --frozen-lockfile
+      - name: typecheck + unit tests (in dev container)
+        run: docker compose run --rm -T dev sh -c "pnpm typecheck && pnpm test"
       - name: Create networks (supabase network binds published ports to 127.0.0.1)
         run: docker compose up --no-start web
       - name: supabase start (in dev container, via Docker socket)
