@@ -199,9 +199,27 @@ export function createInitialState(playerId: string, serverNow: number): PlayerG
   };
 }
 
-/** 深拷貝（狀態只含 JSON 資料） */
+/**
+ * 深拷貝。依狀態的固定結構逐層複製（比 structuredClone 快一個數量級；結算時每個請求都會呼叫）。
+ * 新增巢狀欄位時必須同步更新這裡（test/request.test.ts 檢查拷貝與原狀態沒有共用的物件）。
+ */
 export function cloneState(state: PlayerGameState): PlayerGameState {
-  return structuredClone(state);
+  const discovered: PlayerGameState["discoveredArtifacts"] = {};
+  for (const [id, rec] of Object.entries(state.discoveredArtifacts)) discovered[id as ArtifactId] = { ...rec! };
+  return {
+    ...state,
+    pickaxes: { ...state.pickaxes },
+    mining: { ...state.mining },
+    inventory: { ...state.inventory },
+    heldArtifacts: state.heldArtifacts.map((a) => ({ ...a })),
+    discoveredArtifacts: discovered,
+    firstTreasure: { ...state.firstTreasure },
+    pendingOfflineReport: state.pendingOfflineReport ? cloneReport(state.pendingOfflineReport) : null,
+  };
+}
+
+function cloneReport(r: OfflineReport): OfflineReport {
+  return { ...r, rewards: { coins: r.rewards.coins, items: { ...r.rewards.items }, artifacts: r.rewards.artifacts.map((a) => ({ ...a })) } };
 }
 
 // ---------------------------------------------------------------------------

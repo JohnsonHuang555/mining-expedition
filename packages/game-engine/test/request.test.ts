@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   STATE_SCHEMA_VERSION,
   canonicalCommandJson,
+  cloneState,
   createInitialState,
   executeRequest,
   toPlayerView,
@@ -91,6 +92,23 @@ describe("PlayerGameState", () => {
       if (v && typeof v === "object") Object.values(v).forEach(walk);
     };
     walk(s);
+  });
+
+  it("cloneState：與原狀態完全相等，且沒有共用任何物件", () => {
+    let { s } = run(makeState({ tier: 1, frontier: 100, artifacts: ["a_z1_map"] }), T0 + 5 * HOUR, { type: "settle" });
+    expect(s.pendingOfflineReport).not.toBeNull();
+    const c = cloneState(s);
+    expect(c).toEqual(s);
+    const objects = (v: unknown, acc: Set<object> = new Set()): Set<object> => {
+      if (v && typeof v === "object") {
+        acc.add(v);
+        Object.values(v).forEach((x) => objects(x, acc));
+      }
+      return acc;
+    };
+    const original = objects(s);
+    for (const o of objects(c)) expect(original.has(o)).toBe(false);
+    s = c;
   });
 
   it("狀態與公開 view 不含 RNG 密鑰", () => {
