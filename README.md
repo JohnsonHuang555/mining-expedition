@@ -45,13 +45,14 @@ mining-expedition/
 
 本機只需要 **Docker Desktop**、**Git** 與編輯器。Node.js、pnpm、Supabase CLI 都在開發容器內執行；Supabase 的本地服務由容器內的官方 CLI 透過 Docker 啟動。
 
-> 支援 macOS、Linux、Windows（WSL2）。請在 repo 根目錄執行所有指令。
+> 支援 macOS、Linux、Windows（WSL2 或 PowerShell，見下方「Windows（PowerShell）」）。請在 repo 根目錄執行所有指令。
 
 ### 第一次啟動
 
 ```bash
 cp .env.example .env                                   # 1. compose 設定（通常不需修改）
 docker compose build                                   # 2. 建立開發容器映像
+docker network create supabase_network_mining-expedition   # 2a. 預先建立 Supabase 網路（已存在時會報錯，可忽略）
 docker compose run --rm dev pnpm install               # 3. 安裝套件
 docker compose run --rm dev pnpm supabase:start        # 4. 啟動 Supabase Local（第一次會下載映像，需要幾分鐘）
 docker compose run --rm dev pnpm env:sync              # 5. 產生 apps/web/.env.local
@@ -62,7 +63,19 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 
 全部成功時，第 7 步顯示五個 ✅、第 8 步顯示兩個 ✅。驗收項目與目前狀態見 [`docs/PHASE1_ACCEPTANCE.md`](docs/PHASE1_ACCEPTANCE.md)。
 
-> `web` 會加入 `supabase start` 建立的 Docker 網路，所以一定要先啟動 Supabase（第 4 步）再啟動 web（第 6 步）。
+> `web` 會加入 Supabase 的 Docker 網路，所以一定要先啟動 Supabase（第 4 步）再啟動 web（第 6 步）。
+> 第 2a 步是因為部分 Docker Compose 版本（例如 2.23）執行 `docker compose run dev` 時也會檢查 compose.yaml 中所有外部網路是否存在；`supabase start` 會沿用已存在的網路。
+
+#### Windows（PowerShell）
+
+不使用 WSL2 時，可直接在 PowerShell 執行上面的指令（`cp` 可用 `Copy-Item`），但需要：
+
+1. **Git 以 LF 檢出**：repo 的 `.gitattributes` 已強制 LF。若在加入 `.gitattributes` 之前就 clone，執行一次 `git rm -r --cached -q . && git reset --hard`（會捨棄未提交的變更）重新檢出，否則容器會出現 `/usr/bin/env: 'bash\r': No such file or directory`。
+2. **在 `.env` 設定 `PROJECT_ROOT`** 為 Docker Desktop VM 內的磁碟路徑：`/run/desktop/mnt/host/<小寫磁碟代號>/<路徑>`，例如 repo 在 `D:\code\mining-expedition` 時：
+   ```
+   PROJECT_ROOT=/run/desktop/mnt/host/d/code/mining-expedition
+   ```
+   PowerShell 沒有 `PWD` 環境變數，compose 會顯示多個 `The "PWD" variable is not set` 警告，設定 `PROJECT_ROOT` 後可忽略。
 
 | 服務 | 網址 |
 |---|---|
@@ -126,6 +139,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 |---|---|
 | Docker socket | Supabase CLI 需要 Docker 才能啟動本地服務，所以 `dev` 與 `functions` 會掛載 `/var/run/docker.sock`。**這等同把宿主 Docker 的完整權限交給容器**：只在這兩個服務使用，不要在容器內執行來源不明的程式碼。`web` 不掛載 socket |
 | 非 root 執行 | 入口腳本把容器內的 `node` 使用者對應到 repo 擁有者的 UID / GID，再以 `node` 執行指令。socket 屬於 root 時（Docker Desktop 常見），改用只有 `node` 可存取的代理 socket |
+| Analytics 關閉 | `supabase/config.toml` 設 `[analytics] enabled = false`：Vector 會從宿主掛載 `DOCKER_HOST` 指向的 socket，而 Docker Desktop 上那是只存在於開發容器內的代理 socket，Vector 會失敗。代價是 Studio 的 Logs 頁面沒有資料；函式日誌用 `docker logs supabase_edge_runtime_mining-expedition` |
 | 相同路徑掛載 | Repo 以宿主上的絕對路徑掛載到容器內。Supabase CLI 傳給 Docker 的 bind mount 路徑因此在宿主上也成立 |
 | 網路 | `dev`、`functions` 使用 host network，讓 Supabase CLI 以 `127.0.0.1` 連到它啟動的服務；`web` 加入 Supabase 的 Docker 網路，直接連 API gateway 容器 |
 | 對外埠 | `web` 只綁定 `127.0.0.1:3000`。**Supabase CLI 發布的埠綁定 `0.0.0.0`**，同一網路的裝置可以連到本地 Supabase；在不信任的網路請啟用防火牆，或不用時 `supabase:stop` |
@@ -150,7 +164,9 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | `supabase start` 出現 `permission denied ... docker.sock` | `docker compose run --rm dev docker info` 確認容器能存取 Docker；回報輸出 |
 | `supabase start` 等待健康檢查逾時 | 確認 Docker Desktop 支援 host network（Settings → Resources → Network → Enable host networking），或回報日誌 |
 | `web` 連不到 Supabase | 重新執行 `dev pnpm env:sync`，再 `docker compose restart web` |
-| `docker compose up -d web` 出現 `network supabase_network_mining-expedition declared as external, but could not be found` | 先執行 `dev pnpm supabase:start` |
+| `docker compose up -d web` 或 `docker compose run dev ...` 出現 `network supabase_network_mining-expedition declared as external, but could not be found` | `docker network create supabase_network_mining-expedition`（第 2a 步） |
+| 容器啟動時出現 `/usr/bin/env: 'bash\r': No such file or directory` | 檔案以 CRLF 檢出（Windows）：見「Windows（PowerShell）」第 1 點 |
+| `supabase start` 出現 `supabase_vector_... container is not ready: unhealthy` | 確認 `supabase/config.toml` 的 `[analytics] enabled = false` 沒有被改掉 |
 | 任何驗證失敗 | 執行 `dev pnpm diagnose`，把輸出與 `verify:env` / `verify:hot-reload` 的結果一起回報 |
 | 埠已被占用（3000 / 54321–54324） | 在 `.env` 改 `WEB_PORT`；Supabase 的埠在 `supabase/config.toml` |
 | 想完全重來 | `dev supabase stop --no-backup && docker compose down -v` |

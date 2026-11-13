@@ -54,6 +54,8 @@ jobs:
         run: cp .env.example .env
       - name: Build dev container
         run: docker compose build
+      - name: Create Supabase network
+        run: docker network create supabase_network_mining-expedition
       - name: pnpm install (in dev container)
         run: docker compose run --rm -T dev pnpm install --frozen-lockfile
       - name: supabase start (in dev container, via Docker socket)

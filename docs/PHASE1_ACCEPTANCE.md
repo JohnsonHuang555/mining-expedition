@@ -5,31 +5,34 @@
 **狀態說明**
 
 - ✅ CI（Linux）：在 GitHub Actions 的 `docker integration (Linux)` job 實際執行通過（Ubuntu + Docker Engine，非 Docker Desktop）。
-- ⏳ Docker Desktop：尚未在 Docker Desktop（macOS / Windows）上驗證，需要在本機執行。
+- ✅ Docker Desktop（Windows）：Windows 10 + Docker Desktop（Engine 24.0.6、Compose 2.23.0），以 PowerShell 執行（不經 WSL2），`PROJECT_ROOT=/run/desktop/mnt/host/d/...`。
+- ⏳ Docker Desktop（macOS）：尚未驗證。
 - ❌：已知失敗。
 
 ## 驗收項目
 
-| # | 項目 | 驗證方式 | CI（Linux） | Docker Desktop |
-|---|---|---|---|---|
-| 1 | 建立及啟動開發容器 | `docker compose build`、`docker compose run --rm dev pnpm install` | ✅ | ⏳ |
-| 2 | Supabase CLI 透過 Docker socket 啟動服務 | `docker compose run --rm dev pnpm supabase:start` | ✅ | ⏳ |
-| 3 | Next.js 呼叫真實 Supabase Local | `verify:env` 的「Web（next dev）→ Edge Function / PostgREST」 | ✅ | ⏳ |
-| 4 | Edge Runtime 匯入 `packages/game-engine`、`packages/game-data` | `verify:env` 的「Edge Function → packages/game-engine + Postgres」 | ✅ | ⏳ |
-| 5 | PostgREST、Edge Function、Postgres 全鏈路 | `verify:env` 全部 ✅ | ✅ | ⏳ |
-| 6a | Hot Reload：Next.js 重新載入 `packages/` | `verify:hot-reload` 第 1 項 | ✅ | ⏳ |
-| 6b | Hot Reload：Edge Runtime 重新載入 `packages/` | `verify:hot-reload` 第 2 項（`policy = "oneshot"`） | ✅ | ⏳ |
-| 7 | 正式環境健康檢查不洩漏內部資訊 | `verify:env` 的「Web /api/health 只回傳 ok」；production 模式下診斷端點 404 | ✅ | — |
+| # | 項目 | 驗證方式 | CI（Linux） | Docker Desktop（Windows） | Docker Desktop（macOS） |
+|---|---|---|---|---|---|
+| 1 | 建立及啟動開發容器 | `docker compose build`、`docker compose run --rm dev pnpm install` | ✅ | ✅ | ⏳ |
+| 2 | Supabase CLI 透過 Docker socket 啟動服務 | `docker compose run --rm dev pnpm supabase:start` | ✅ | ✅ | ⏳ |
+| 3 | Next.js 呼叫真實 Supabase Local | `verify:env` 的「Web（next dev）→ Edge Function / PostgREST」 | ✅ | ✅ | ⏳ |
+| 4 | Edge Runtime 匯入 `packages/game-engine`、`packages/game-data` | `verify:env` 的「Edge Function → packages/game-engine + Postgres」 | ✅ | ✅ | ⏳ |
+| 5 | PostgREST、Edge Function、Postgres 全鏈路 | `verify:env` 全部 ✅ | ✅ | ✅ | ⏳ |
+| 6a | Hot Reload：Next.js 重新載入 `packages/` | `verify:hot-reload` 第 1 項 | ✅ | ✅ | ⏳ |
+| 6b | Hot Reload：Edge Runtime 重新載入 `packages/` | `verify:hot-reload` 第 2 項（`policy = "oneshot"`） | ✅ | ✅ | ⏳ |
+| 6c | Hot Reload：從宿主（Windows）存檔 | 在 Windows 端覆寫 `dev-marker.ts`，輪詢 web 與 Edge | — | ✅ web 1.35 s / edge 1.54 s | ⏳ |
+| 7 | 正式環境健康檢查不洩漏內部資訊 | `verify:env` 的「Web /api/health 只回傳 ok」；production 模式下診斷端點 404 | ✅ | ✅ | — |
 
 CI 的完整紀錄：PR #2 的 Checks → `docker integration (Linux)`，其中 `diagnose` 步驟的輸出包含工具版本、socket 權限、容器、網路、Edge Runtime 掛載與日誌。
 
 ## 在 Docker Desktop 上驗收
 
-在 repo 根目錄執行（macOS 終端機，或 Windows 的 WSL2）：
+在 repo 根目錄執行（macOS 終端機、Windows 的 WSL2，或 Windows PowerShell — 後者先依 README「Windows（PowerShell）」設定 `PROJECT_ROOT`）：
 
 ```bash
 cp .env.example .env
 docker compose build
+docker network create supabase_network_mining-expedition   # 已存在時會報錯，可忽略
 docker compose run --rm dev pnpm install
 docker compose run --rm dev pnpm supabase:start
 docker compose run --rm dev pnpm env:sync
@@ -53,7 +56,9 @@ docker compose run --rm dev pnpm diagnose            # 不論成功或失敗都�
 | `docker compose build` | build 輸出 | 下載 Supabase CLI（github.com）或 Docker 映像被擋 |
 | `supabase:start` 出現 `permission denied ... docker.sock` | `diagnose` 的「Docker socket 權限」 | Docker Desktop 的 socket 屬於 root：入口腳本應改用 `/var/run/docker-node.sock` 代理，確認 `DOCKER_HOST` |
 | `supabase:start` 健康檢查逾時 | `diagnose` 的「Supabase 容器」 | Docker Desktop 的 host network 行為與 Linux 不同（`dev` 容器以 `127.0.0.1` 連服務） |
-| `up -d web` 找不到 `supabase_network_mining-expedition` | — | 還沒執行 `supabase:start` |
+| `up -d web` 或 `run dev` 找不到 `supabase_network_mining-expedition` | — | 沒有預先建立網路（Compose 2.23 在 `run dev` 時也會檢查） |
+| 容器啟動即失敗：`/usr/bin/env: 'bash\r'` | `git ls-files --eol docker/entrypoint.sh` | Windows 以 CRLF 檢出；需要 `.gitattributes` 並重新檢出 |
+| `supabase:start`：`supabase_vector_... unhealthy` | — | Analytics 被開啟：Vector 掛載的是開發容器內的代理 socket 路徑，宿主上不存在 |
 | `verify:env` 的 Edge Function 項目失敗 | `diagnose` 的「Edge Runtime 掛載」「Edge Runtime 最近日誌」 | 掛載清單沒有 `packages/` 的檔案（路徑不一致），或匯入錯誤 |
 | `verify:env` 的 Web 項目失敗 | `diagnose` 的「web 最近日誌」 | `apps/web/.env.local` 未產生或過期：重新 `env:sync` 並 `docker compose restart web` |
 | `verify:hot-reload` 的 web 項目失敗 | — | 檔案監看收不到事件：`.env` 設 `WATCHPACK_POLLING=true` 後 `docker compose up -d web` |
@@ -67,7 +72,16 @@ docker compose run --rm dev pnpm diagnose            # 不論成功或失敗都�
 | Socket 權限 | Linux 的 socket 屬於 `docker` 群組，入口腳本以群組方式授權給 `node`（UID 對應到 repo 擁有者 1001） |
 | Edge Runtime 掛載 | `supabase/functions` 整個資料夾，加上**被匯入的 `packages/` 檔案逐一單獨掛載**（啟動時計算） |
 | 本地金鑰格式 | `supabase status` 提供 `sb_publishable_…` / `sb_secret_…`；`env:sync` 使用 publishable key |
-| 對外綁定 | Supabase CLI 發布的埠綁定 **`0.0.0.0`**（54321 API、54322 Postgres、54323 Studio、54324 Mailpit、54327 Analytics） |
+| 對外綁定 | Supabase CLI 發布的埠綁定 **`0.0.0.0`**（54321 API、54322 Postgres、54323 Studio、54324 Mailpit；關閉 Analytics 前另有 54327） |
+
+## Docker Desktop（Windows）實測發現並已修正
+
+| 發現 | 處理 |
+|---|---|
+| `core.autocrlf=true` 讓 `docker/entrypoint.sh` 以 CRLF 檢出，容器無法啟動（`bash\r`） | 新增 `.gitattributes`（`* text=auto eol=lf`） |
+| Socket 屬於 root → 入口腳本改用代理 socket，`DOCKER_HOST=unix:///var/run/docker-node.sock`；Supabase CLI 把這個路徑從**宿主**掛載給 Vector，宿主上不存在 → Vector unhealthy，`supabase start` 失敗。CI（Linux）走群組授權分支，所以沒遇到 | `supabase/config.toml` 關閉 `[analytics]`（不啟動 Vector / Logflare） |
+| Compose 2.23 執行 `docker compose run dev` 時也要求外部網路存在，`supabase start` 前的 `pnpm install` 就失敗 | 第一次啟動前 `docker network create supabase_network_mining-expedition`（CI 同步） |
+| PowerShell 沒有 `PWD` 環境變數；Windows 路徑無法當作容器內路徑 | `.env` 設 `PROJECT_ROOT=/run/desktop/mnt/host/<磁碟>/...`（Docker Desktop VM 內的同一路徑，宿主 daemon 與容器內都成立） |
 
 ## 已知限制
 
