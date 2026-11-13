@@ -270,15 +270,115 @@ function isNonNegInt(v: unknown): v is number {
   return typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 }
 
-/** 回傳所有違反的不變式；空陣列代表合法 */
-export function validateState(state: PlayerGameState): string[] {
+// ---- 結構檢查：輸入是不可信的 JSON（資料庫快照、反序列化結果），先確認每一層的型別 ----
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+const isNum = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
+const isStr = (v: unknown): v is string => typeof v === "string";
+
+function shapeIssues(v: unknown): string[] {
+  const out: string[] = [];
+  const need = (ok: boolean, path: string, what: string) => {
+    if (!ok) out.push(`${path} must be ${what}`);
+  };
+  const fields = (o: Obj, path: string, spec: Record<string, (x: unknown) => boolean>, what: Record<string, string>) => {
+    for (const [k, test] of Object.entries(spec)) need(test(o[k]), `${path}.${k}`, what[k] ?? "valid");
+  };
+  const numOrNull = (x: unknown) => x === null || isNum(x);
+  const strOrNull = (x: unknown) => x === null || isStr(x);
+  const numMap = (x: unknown) => isObj(x) && Object.values(x).every(isNum);
+  const instanceSpec = { instanceId: isStr, artifactId: isStr, obtainedAt: isNum, mode: isStr, band: isNum, frontierBlockIndex: numOrNull, digCounter: isNum, source: isStr };
+  const instanceWhat = { instanceId: "a string", artifactId: "a string", obtainedAt: "a number", mode: "a string", band: "a number", frontierBlockIndex: "a number or null", digCounter: "a number", source: "a string" };
+  const instances = (x: unknown, path: string, extra?: (o: Obj, p: string) => void) => {
+    if (!Array.isArray(x)) return need(false, path, "an array");
+    x.forEach((a, i) => {
+      if (!isObj(a)) return need(false, `${path}[${i}]`, "an object");
+      fields(a, `${path}[${i}]`, instanceSpec, instanceWhat);
+      extra?.(a, `${path}[${i}]`);
+    });
+  };
+
+  if (!isObj(v)) return ["state must be an object"];
+  for (const k of ["schemaVersion", "stateVersion", "dataVersion", "rngVersion", "createdAt", "lastSettledAt", "coins"]) need(isNum(v[k]), k, "a number");
+  for (const k of ["playerId", "equippedPickaxe"]) need(isStr(v[k]), k, "a string");
+  need(strOrNull(v.lastClaimedReportId), "lastClaimedReportId", "a string or null");
+  need(numMap(v.pickaxes), "pickaxes", "an object of numbers");
+  need(isNum(v.unlockedZone), "unlockedZone", "a number");
+  need(numMap(v.inventory), "inventory", "an object of numbers");
+
+  if (!isObj(v.mining)) need(false, "mining", "an object");
+  else {
+    const m = v.mining;
+    need(isStr(m.mode), "mining.mode", "a string");
+    need(numOrNull(m.revisitZone), "mining.revisitZone", "a number or null");
+    need(numOrNull(m.reworkBand), "mining.reworkBand", "a number or null");
+    for (const k of ["frontierBlockIndex", "digCounter", "blockWork", "blockMs"]) need(isNum(m[k]), `mining.${k}`, "a number");
+  }
+
+  instances(v.heldArtifacts, "heldArtifacts");
+
+  if (!isObj(v.discoveredArtifacts)) need(false, "discoveredArtifacts", "an object");
+  else {
+    for (const [id, rec] of Object.entries(v.discoveredArtifacts)) {
+      if (!isObj(rec)) need(false, `discoveredArtifacts.${id}`, "an object");
+      else for (const k of ["firstDiscoveredAt", "firstBand", "totalFound"]) need(isNum(rec[k]), `discoveredArtifacts.${id}.${k}`, "a number");
+    }
+  }
+
+  if (!isObj(v.firstTreasure)) need(false, "firstTreasure", "an object");
+  else {
+    const f = v.firstTreasure;
+    need(isStr(f.status), "firstTreasure.status", "a string");
+    need(isNum(f.effectiveMiningMs), "firstTreasure.effectiveMiningMs", "a number");
+    need(numOrNull(f.resolvedAt), "firstTreasure.resolvedAt", "a number or null");
+    need(strOrNull(f.artifactInstanceId), "firstTreasure.artifactInstanceId", "a string or null");
+    need(strOrNull(f.reportId), "firstTreasure.reportId", "a string or null");
+  }
+
+  const r = v.pendingOfflineReport;
+  if (r !== null) {
+    if (!isObj(r)) need(false, "pendingOfflineReport", "an object or null");
+    else {
+      need(isStr(r.reportId), "pendingOfflineReport.reportId", "a string");
+      need(isStr(r.mode) && isStr(r.stopReason), "pendingOfflineReport.mode/stopReason", "strings");
+      need(typeof r.firstTreasureGranted === "boolean", "pendingOfflineReport.firstTreasureGranted", "a boolean");
+      for (const k of ["periodStart", "periodEnd", "simulatedMs", "discardedMs", "minedMs", "idleMs", "blocksMined", "frontierFrom", "frontierTo", "digCounterFrom", "digCounterTo"]) {
+        need(isNum(r[k]), `pendingOfflineReport.${k}`, "a number");
+      }
+      if (!isObj(r.rewards)) need(false, "pendingOfflineReport.rewards", "an object");
+      else {
+        need(isNum(r.rewards.coins), "pendingOfflineReport.rewards.coins", "a number");
+        need(numMap(r.rewards.items), "pendingOfflineReport.rewards.items", "an object of numbers");
+        instances(r.rewards.artifacts, "pendingOfflineReport.rewards.artifacts", (o, p) => need(typeof o.isNewDiscovery === "boolean", `${p}.isNewDiscovery`, "a boolean"));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 回傳所有違反的不變式；空陣列代表合法。
+ * 輸入可以是任何值（不可信的資料庫快照）：先檢查結構，再檢查遊戲不變式；本函式不會丟出例外。
+ */
+export function validateState(input: unknown): string[] {
+  const shape = shapeIssues(input);
+  if (shape.length > 0) return shape;
+  try {
+    return semanticIssues(input as PlayerGameState);
+  } catch (e) {
+    // 最後防線：任何未預期的資料形狀都回報為不合法，而不是讓呼叫端崩潰
+    return [`malformed state: ${e instanceof Error ? e.message : String(e)}`];
+  }
+}
+
+function semanticIssues(state: PlayerGameState): string[] {
   const issues: string[] = [];
   const check = (ok: boolean, msg: string) => {
     if (!ok) issues.push(msg);
   };
   const int = (v: unknown, name: string) => check(isNonNegInt(v), `${name} must be a non-negative safe integer`);
 
-  if (typeof state !== "object" || state === null) return ["state must be an object"];
   check(state.schemaVersion === STATE_SCHEMA_VERSION, `schemaVersion must be ${STATE_SCHEMA_VERSION}`);
   check(typeof state.playerId === "string" && state.playerId.length > 0, "playerId must be a non-empty string");
   int(state.stateVersion, "stateVersion");
@@ -375,7 +475,7 @@ export function validateState(state: PlayerGameState): string[] {
   return issues;
 }
 
-export function assertValidState(state: PlayerGameState): void {
+export function assertValidState(state: unknown): asserts state is PlayerGameState {
   const issues = validateState(state);
   if (issues.length > 0) throw new RangeError(`invalid PlayerGameState: ${issues.join("; ")}`);
 }

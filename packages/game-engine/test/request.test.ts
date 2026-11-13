@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   STATE_SCHEMA_VERSION,
+  applyAction,
+  settle,
   canonicalCommandJson,
   cloneState,
   createInitialState,
@@ -52,7 +54,10 @@ describe("executeRequest：先結算再操作、stateVersion、提交計畫", ()
     expect(blocked).toMatchObject({ ok: false, error: { code: "REPORT_PENDING" }, commit: null });
     const claim = executeRequest(s, { requestId: "c1", command: { type: "claim_report", reportId: id } }, { serverNow: T0 + 4 * HOUR, rng });
     expect(claim.commit).toMatchObject({ reportClaimed: id, reportCreated: null });
-    expect(claim.state.lastSettledAt).toBe(T0 + 3 * HOUR); // 等待領取的時間在領取後才結算
+    expect(claim.state.lastSettledAt).toBe(T0 + 4 * HOUR); // D24：等待領取的 1 小時暫停、不補算
+    const after = executeRequest(claim.commit!.state, { requestId: "n1", command: { type: "settle" } }, { serverNow: T0 + 4 * HOUR + 60_000, rng });
+    expect(after.settlement!.kind).toBe("online");
+    expect(after.commit!.reportCreated).toBeNull();
     s = claim.commit!.state;
     // 同一個 key 重送由 action_log 處理；不同 key 再領一次：已領取，不重複入帳
     const again = executeRequest(s, { requestId: "c2", command: { type: "claim_report", reportId: id } }, { serverNow: T0 + 4 * HOUR, rng });
@@ -155,3 +160,59 @@ describe("PlayerGameState", () => {
     expect(executeRequest(s, { requestId: "k", command: { type: "claim_report", reportId: "r1" } }, { serverNow: T0 + 1, rng }).error!.code).toBe("INVALID_STATE");
   });
 });
+
+describe("不可信的狀態快照（結構錯誤時回傳 INVALID_STATE，不會丟出例外）", () => {
+  const valid = () => structuredClone(makeState({ tier: 1, frontier: 120, artifacts: ["a_z1_map"] }));
+  const withReport = () => {
+    const r = run(makeState({ tier: 1, frontier: 100 }), T0 + 3 * HOUR, { type: "settle" });
+    return structuredClone(r.s);
+  };
+  const cases: [string, () => unknown][] = [
+    ["null", () => null],
+    ["undefined", () => undefined],
+    ["數字", () => 42],
+    ["字串", () => "state"],
+    ["陣列", () => []],
+    ["空物件", () => ({})],
+    ["缺少 mining", () => { const s = valid() as unknown as Record<string, unknown>; delete s.mining; return s; }],
+    ["mining = null", () => ({ ...valid(), mining: null })],
+    ["mining 欄位是字串", () => { const s = valid(); (s.mining as unknown as Record<string, unknown>).frontierBlockIndex = "100"; return s; }],
+    ["inventory = null", () => ({ ...valid(), inventory: null })],
+    ["inventory 值是字串", () => ({ ...valid(), inventory: { stone: "5" } })],
+    ["pickaxes 是陣列", () => ({ ...valid(), pickaxes: ["pick_wood"] })],
+    ["heldArtifacts 不是陣列", () => ({ ...valid(), heldArtifacts: {} })],
+    ["heldArtifacts 含 null", () => ({ ...valid(), heldArtifacts: [null] })],
+    ["寶物缺 instanceId", () => { const s = valid(); delete (s.heldArtifacts[0] as Partial<(typeof s.heldArtifacts)[0]>).instanceId; return s; }],
+    ["discoveredArtifacts = null", () => ({ ...valid(), discoveredArtifacts: null })],
+    ["圖鑑紀錄是 null", () => ({ ...valid(), discoveredArtifacts: { a_z1_map: null } })],
+    ["缺少 firstTreasure", () => { const s = valid() as unknown as Record<string, unknown>; delete s.firstTreasure; return s; }],
+    ["firstTreasure.status 是數字", () => { const s = valid(); (s.firstTreasure as unknown as Record<string, unknown>).status = 1; return s; }],
+    ["缺少 pendingOfflineReport 欄位", () => { const s = valid() as unknown as Record<string, unknown>; delete s.pendingOfflineReport; return s; }],
+    ["報告 rewards = null", () => { const s = withReport(); (s.pendingOfflineReport as unknown as Record<string, unknown>).rewards = null; return s; }],
+    ["報告 artifacts 不是陣列", () => { const s = withReport(); (s.pendingOfflineReport!.rewards as unknown as Record<string, unknown>).artifacts = "x"; return s; }],
+    ["報告 periodEnd 缺少", () => { const s = withReport(); delete (s.pendingOfflineReport as Partial<NonNullable<typeof s.pendingOfflineReport>>).periodEnd; return s; }],
+    ["coins 是 NaN", () => ({ ...valid(), coins: Number.NaN })],
+    ["coins 是 bigint", () => ({ ...valid(), coins: 5n })],
+  ];
+
+  it.each(cases)("%s", (_name, make) => {
+    const bad = make();
+    let issues: string[] = [];
+    expect(() => (issues = validateState(bad))).not.toThrow();
+    expect(issues.length).toBeGreaterThan(0);
+    const ctx = { serverNow: T0 + HOUR, rng };
+    expect(() => settle(bad as never, ctx)).not.toThrow();
+    expect(settle(bad as never, ctx)).toMatchObject({ ok: false, error: { code: "INVALID_STATE" } });
+    expect(applyAction(bad as never, { type: "select_mining_mode", mode: "frontier" })).toMatchObject({ ok: false, error: { code: "INVALID_STATE" } });
+    const r = executeRequest(bad as never, { requestId: "k", command: { type: "settle" } }, ctx);
+    expect(r).toMatchObject({ ok: false, error: { code: "INVALID_STATE" }, commit: null, expectedStateVersion: -1 });
+    expect(executeRequest(bad as never, { requestId: "k", command: { type: "claim_report", reportId: "r1" } }, ctx).error!.code).toBe("INVALID_STATE");
+  });
+
+  it("合法的狀態與帶報告的狀態都通過結構檢查", () => {
+    expect(validateState(valid())).toEqual([]);
+    expect(validateState(withReport())).toEqual([]);
+    expect(validateState(JSON.parse(JSON.stringify(withReport())))).toEqual([]);
+  });
+});
+
