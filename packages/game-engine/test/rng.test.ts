@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   SFC32_WARMUP,
   SequenceSource,
+  RNG_SECRET_BYTES,
   Sfc32,
   blockMessage,
   createBlockRng,
+  createHmacSha256,
   hmacSha256,
   seedWords,
   sha256,
@@ -16,6 +18,7 @@ const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 const bytes = (h: string) => new Uint8Array(Buffer.from(h, "hex"));
 const utf8 = (s: string) => new TextEncoder().encode(s);
 
+// SHA-256 / HMAC 由 @noble/hashes 提供；以下測試確認引擎的包裝（含快取金鑰狀態的 createHmacSha256）輸出正確
 describe("SHA-256（FIPS 180-4 範例）", () => {
   it("空字串與 abc", () => {
     expect(hex(sha256(utf8("")))).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
@@ -51,6 +54,15 @@ describe("HMAC-SHA256（RFC 4231）", () => {
         ),
       ),
     ).toBe("9b09ffa71b942fcb27635fbcd5b0e944bfdc63644f0713938a7f51535c3a35e2");
+  });
+
+  it("createHmacSha256（快取金鑰狀態）重複使用時每次結果都與 node:crypto 相同", () => {
+    const key = randomBytes(32);
+    const mac = createHmacSha256(new Uint8Array(key));
+    for (let i = 0; i < 300; i++) {
+      const msg = utf8(`block:${i}`);
+      expect(hex(mac(msg))).toBe(createHmac("sha256", key).update(msg).digest("hex"));
+    }
   });
 
   it("隨機金鑰與訊息與 node:crypto 相同", () => {
@@ -121,6 +133,12 @@ describe("逐方塊亂數（TECHNICAL_SPEC §6.2）", () => {
   it("拒絕負數或非整數的 digCounter", () => {
     expect(() => blockMessage(-1)).toThrow(RangeError);
     expect(() => blockMessage(1.5)).toThrow(RangeError);
-    expect(() => createBlockRng(new Uint8Array(0))).toThrow(RangeError);
+  });
+
+  it("rngSecret 必須剛好 32 bytes（TECHNICAL_SPEC §8.3）", () => {
+    for (const len of [0, 1, 16, 31, 33, 64]) expect(() => createBlockRng(new Uint8Array(len))).toThrow(RangeError);
+    expect(() => createBlockRng("x".repeat(32) as unknown as Uint8Array)).toThrow(RangeError);
+    expect(RNG_SECRET_BYTES).toBe(32);
+    expect(() => createBlockRng(new Uint8Array(32))).not.toThrow();
   });
 });
