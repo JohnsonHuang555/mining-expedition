@@ -57,13 +57,19 @@ function compress(state: Uint32Array, block: Uint8Array, offset: number): void {
  * 從已處理 `prefixBytes` 個位元組的 state 繼續雜湊 message（prefixBytes 必須是 64 的倍數）。
  * HMAC 用它快取 ipad / opad 區塊，每個方塊只需 2 次壓縮。
  */
+const STATE = new Uint32Array(8);
+const TAIL = new Uint8Array(BLOCK_BYTES * 2);
+
 function finish(initial: Uint32Array, prefixBytes: number, message: Uint8Array): Uint8Array {
-  const state = new Uint32Array(initial);
+  // 同步、不可重入：共用暫存區以避免每次配置記憶體（結算時每個方塊呼叫 2 次）
+  const state = STATE;
+  state.set(initial);
   const full = message.length - (message.length % BLOCK_BYTES);
   for (let off = 0; off < full; off += BLOCK_BYTES) compress(state, message, off);
   const restLen = message.length - full;
   const padLen = restLen < 56 ? BLOCK_BYTES : BLOCK_BYTES * 2;
-  const tail = new Uint8Array(padLen);
+  const tail = TAIL;
+  tail.fill(0, 0, padLen);
   tail.set(message.subarray(full));
   tail[restLen] = 0x80;
   const bitLen = (prefixBytes + message.length) * 8;

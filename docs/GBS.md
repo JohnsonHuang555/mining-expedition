@@ -694,7 +694,7 @@ zone3 沒有煤炭與鐵礦；S5 需要的強化石靠回訪 zone1 / zone2 取�
 
 ```bash
 pnpm install                                                 # 第一次：建立 workspace 連結（模擬器匯入 @mining/*）
-node scripts/balance-sim.ts                                  # 全部報表（約 8 分鐘，預設 --protect 4）
+node scripts/balance-sim.ts                                  # 全部報表（約 10–15 分鐘；舊版約 4 分鐘，差距來自逐方塊 HMAC；預設 --protect 4）
 node scripts/balance-sim.ts --only profiles --protect none   # §16
 node scripts/balance-sim.ts --only revisit                   # §14.3
 node scripts/balance-sim.ts --only speed                     # §7.6

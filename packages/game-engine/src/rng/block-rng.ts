@@ -13,13 +13,18 @@ import type { RandomSource } from "./random-source.ts";
 import { Sfc32 } from "./sfc32.ts";
 import { createHmacSha256 } from "./sha256.ts";
 
-const encoder = new TextEncoder();
+const PREFIX = [0x62, 0x6c, 0x6f, 0x63, 0x6b, 0x3a]; // "block:"
 
+/** UTF-8("block:" + digCounter 十進位)。內容只有 ASCII，直接編碼（與 TextEncoder 結果相同） */
 export function blockMessage(digCounter: number): Uint8Array {
   if (!Number.isSafeInteger(digCounter) || digCounter < 0) {
     throw new RangeError(`digCounter must be a non-negative safe integer, got ${digCounter}`);
   }
-  return encoder.encode(`block:${digCounter}`);
+  const digits = String(digCounter);
+  const out = new Uint8Array(PREFIX.length + digits.length);
+  out.set(PREFIX);
+  for (let i = 0; i < digits.length; i++) out[PREFIX.length + i] = digits.charCodeAt(i);
+  return out;
 }
 
 /** digest 前 16 bytes → 4 個 big-endian uint32 */

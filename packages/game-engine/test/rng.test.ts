@@ -98,6 +98,9 @@ describe("逐方塊亂數（TECHNICAL_SPEC §6.2）", () => {
 
   it("種子 = HMAC-SHA256(secret, 'block:' + digCounter) 前 16 bytes，big-endian", () => {
     expect(new TextDecoder().decode(blockMessage(42))).toBe("block:42");
+    for (const c of [0, 9, 10, 123_456_789, Number.MAX_SAFE_INTEGER]) {
+      expect(blockMessage(c)).toEqual(new TextEncoder().encode(`block:${c}`));
+    }
     const digest = createHmac("sha256", secret).update("block:42").digest();
     const [a, b, c, d] = seedWords(new Uint8Array(digest));
     expect([a, b, c, d]).toEqual([0, 4, 8, 12].map((o) => digest.readUInt32BE(o)));
