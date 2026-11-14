@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.9 | Client Reliability：§12.6 未確認操作（Request ID 持久化與調和）、回應結構驗證；新增 §12.8 Runtime 生命週期。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.8 | Playable MVP（Auth + Mining UI）：§12 改為已實作的前端（Zustand store、`predictBlockProgress`、同步排程 20 秒心跳 / 方塊完成時同步（間隔 ≥ 10 秒）、路由 `/`、`/login`），新增 §12.6 API Client 與錯誤處理、§12.7 多分頁。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.7 | Supabase Integration（2/2）：§10.1 / §10.2 改為已實作的 3 個 Edge Function（取代原本一動作一端點的規劃）；新增 §10.7 身分驗證與 verify_jwt 決策、§10.8 Edge Runtime 實測效能。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.6 | Supabase Integration（1/2）：§8.2–§8.5 依實作的 schema 更新（與 v1.5 草稿的差異見 §8.6）；§10.4 RPC 名稱與流程；§10.6 回應保存規則；§14.5 真實 Supabase Local 整合測試。**遊戲規則、數值與 RNG_VERSION 不變** |
@@ -708,8 +709,23 @@ interface GameUiState {
 - Idempotency-Key：每個獨立操作 `crypto.randomUUID()`；同一個操作的所有重試沿用同一個 key（包含玩家按「重試」領取同一份報告）。
 - 401：`refreshSession()` 一次後以同一個 key 重送；仍失敗 → 本機登出並導向 `/login?expired=1`。
 - 網路錯誤、逾時（15 秒）、502 / 503 / 504、`SERVER_BUSY`、`VERSION_CONFLICT`：以同一個 key 退避重試（0.5 / 1.5 / 3.5 秒）。逾時的請求可能已提交，重送會拿到伺服器保存的同一個回應。
+- **未確認操作【v1.9】**：玩家操作（領取、模式、解鎖、出售、購買、裝備、強化、製作）送出前先把 `{ requestId, command }` 存到 `localStorage`（key 含 userId：`mining-expedition:pending-action:v1:<userId>`）。
+  - 清除條件：伺服器確定的結果——成功，或已保存在 `action_log` 的遊戲規則拒絕（金幣不足等）。
+  - 保留條件：`NETWORK`、逾時、`BAD_RESPONSE`、503 `SERVER_BUSY`、409 `VERSION_CONFLICT`、500、401——這些都不代表伺服器沒有提交。
+  - 調和：玩家重按同一個操作、下一次自動同步、或重新整理後的 bootstrap，都以**同一個 requestId** 重送；伺服器回傳原結果（已提交）或第一次執行（未提交）。
+  - 未確認期間不接受其他玩家操作（畫面顯示「上一個操作的結果尚未確認」與「重新確認」按鈕）；換帳號不會讀到其他使用者的 key。
+  - 自動結算（settle）不保存：重複結算只依伺服器時間推進，不會重複發放。
+- **回應驗證【v1.9】**：`lib/game/validate.ts` 在寫入 store 前檢查 `ok`、`stateVersion`（與 `state.state.stateVersion` 一致）、`state`（PlayerStateView 的必要欄位與型別）、`events`、`settlement`、`report`、`error`；HTTP 狀態碼與 `ok` 必須一致。不合法 → `BAD_RESPONSE`（不複製資料；原物件通過檢查後直接寫入）。
 - 錯誤對應：`REPORT_PENDING` → 重新讀取並顯示報告；`REPORT_ALREADY_CLAIMED` / `REPORT_NOT_FOUND` → 提示並重新讀取；`CHARACTER_NOT_FOUND` → 建立角色畫面；`INTERNAL_ERROR` → 錯誤訊息（不重試）。
 - 沒有使用 TanStack Query：狀態只有一份伺服器快照，由 Controller 統一寫入 Zustand，避免兩套快取。
+
+### 12.8 Runtime 生命週期【v1.9】
+
+- 每位登入使用者一組 `{ API Client, Store, Controller }`，以參考計數管理（`acquireRuntime` / `releaseRuntime`），只在 React effect 中建立與釋放；render 沒有副作用。
+- 最後一次 release 後延後到下一個 macrotask 才 dispose：Strict Mode 的 mount → unmount → mount 沿用同一組，不會重複 bootstrap。
+- 換帳號：其他使用者的 runtime 立即 dispose；`useGameRuntime` 只回傳 userId 相同、未 dispose 的 runtime。
+- `dispose()`：不再寫入 store（進行中的請求回來時直接丟棄）、清除計時器、取消訂閱並關閉 BroadcastChannel。
+- 舊 runtime 的 API Client 只會使用屬於同一個 userId 的 token；換帳號後舊請求不會帶著新使用者的身分送出。
 
 ### 12.7 多分頁
 

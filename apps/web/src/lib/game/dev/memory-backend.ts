@@ -14,7 +14,7 @@ interface Row {
   secret: string;
 }
 
-export type Fault = "network" | "busy" | "unauthorized" | "drop_response";
+export type Fault = "network" | "busy" | "unauthorized" | "drop_response" | "malformed" | "malformed_after_commit";
 
 export class MemoryBackend {
   now: number;
@@ -110,6 +110,7 @@ export class MemoryBackend {
       this.requests.push({ fn, key, body, status });
       return new Response(JSON.stringify(payload), { status, headers: { "Content-Type": "application/json", ...extra } });
     };
+    if (fault === "malformed") return respond(200, { ok: true, requestId: key, command: "settle" }); // state / events 缺少
     if (fault === "busy") return respond(503, { ok: false, requestId: key, command: null, error: { code: "SERVER_BUSY", message: "try again" } });
     const token = /^Bearer (.+)$/.exec(headers.get("Authorization") ?? "")?.[1];
     const userId = token ? this.tokens.get(token) : undefined;
@@ -135,6 +136,8 @@ export class MemoryBackend {
     }
     // 伺服器已提交，但回應在網路上遺失（逾時）：Client 必須用同一個 key 重送
     if (fault === "drop_response") return this.dropped(fn, key, body);
+    // 伺服器已提交，但回應在途中損壞
+    if (fault === "malformed_after_commit") return respond(200, { ...r, state: { state: null } });
     return respond(httpStatus(r), r, { "Idempotent-Replayed": String(replayed) });
   };
 
