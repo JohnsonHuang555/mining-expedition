@@ -12,7 +12,8 @@ const SHOTS = process.env.E2E_SCREENSHOT_DIR ?? "screenshots";
 mkdirSync(SHOTS, { recursive: true });
 
 async function shot(page: Page, name: string) {
-  await page.screenshot({ path: `${SHOTS}/${test.info().project.name}-${name}.png`, fullPage: false });
+  await page.waitForTimeout(500); // 等彈出動畫結束
+  await page.screenshot({ path: `${SHOTS}/${test.info().project.name}-${name}.png`, fullPage: false, animations: "disabled" });
 }
 
 async function userId(email: string): Promise<string> {
