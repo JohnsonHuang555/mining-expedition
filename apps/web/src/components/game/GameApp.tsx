@@ -1,18 +1,21 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef } from "react";
+import { type ReactNode, useCallback, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth/auth-provider";
 import { disposeAllRuntimes } from "@/lib/game/runtime";
 import { Panel, PixelButton } from "@/components/ui/pixel";
 import { CreateCharacter } from "./CreateCharacter";
-import { Dashboard } from "./Dashboard";
+import { GameFrame, MineContent } from "./Dashboard";
 import { OfflineReportModal } from "./OfflineReportModal";
 import { RuntimeContext, useController, useGame } from "./runtime-context";
 import { useGameRuntime } from "./use-game-runtime";
 
-/** 登入狀態 → 遊戲狀態的進入點。未登入一律導向 /login。 */
-export function GameApp() {
+/**
+ * 登入狀態 → 遊戲狀態的進入點（app/(game)/layout.tsx）。未登入一律導向 /login。
+ * 放在共用 layout：在挖礦 / 背包 / 工坊之間切換時 runtime、同步與待領報告都不會中斷或重建。
+ */
+export function GameApp({ children }: { children?: ReactNode }) {
   const auth = useAuth();
   const router = useRouter();
   const expired = useRef(false);
@@ -37,12 +40,14 @@ export function GameApp() {
 
   return (
     <RuntimeContext.Provider value={runtime}>
-      <GameScreens email={auth.email} onSignOut={() => void signOut()} />
+      <GameScreens email={auth.email} onSignOut={() => void signOut()}>
+        {children}
+      </GameScreens>
     </RuntimeContext.Provider>
   );
 }
 
-export function GameScreens({ email, onSignOut }: { email: string | null; onSignOut(): void }) {
+export function GameScreens({ email, onSignOut, children }: { email: string | null; onSignOut(): void; children?: ReactNode }) {
   const controller = useController();
   const phase = useGame((s) => s.phase);
   const view = useGame((s) => s.view);
@@ -81,7 +86,9 @@ export function GameScreens({ email, onSignOut }: { email: string | null; onSign
   if (!view) return <Splash text="連線到礦坑…" />;
   return (
     <>
-      <Dashboard email={email} onSignOut={onSignOut} />
+      <GameFrame email={email} onSignOut={onSignOut}>
+        {children ?? <MineContent />}
+      </GameFrame>
       {view.state.pendingOfflineReport && <OfflineReportModal report={view.state.pendingOfflineReport} />}
     </>
   );

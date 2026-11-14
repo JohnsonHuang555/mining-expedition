@@ -211,4 +211,60 @@ describe("Web Client × 真實 Supabase Local", () => {
     const purchases = await pool.query(`select count(*)::int as n from public.action_log where player_id = $1 and command = 'purchase_pickaxe'`, [u.userId]);
     expect(purchases.rows[0].n).toBe(1);
   });
+
+  it("經濟循環（真實 Edge Functions）：挖礦 → 出售 → 購買 → 製作 → 強化 → 裝備 → 成長有效；重新登入後一致", async () => {
+    const u = await signUp();
+    const t = tab(u.supabase);
+    await t.controller.createCharacter();
+    await rewind(u.userId, 4 * HOUR);
+    await t.controller.retryBootstrap();
+    expect(await t.controller.claimReport()).toBe(true);
+    const s0 = t.store.getState().view!.state;
+    expect(s0.inventory.stone ?? 0).toBeGreaterThan(150);
+    expect(s0.inventory.iron_ore ?? 0).toBeGreaterThan(10);
+
+    // 出售：金額由伺服器決定（石頭固定 1 金幣）
+    expect(await t.controller.perform({ type: "sell_items", itemId: "stone", quantity: 50 })).toBe("ok");
+    const sold = t.store.getState().lastAction!.events.find((e) => e.type === "items_sold");
+    expect(sold).toMatchObject({ itemId: "stone", quantity: 50, coins: 50 });
+
+    // 購買（自動裝備）→ 製作強化石 → 強化
+    expect(await t.controller.perform({ type: "purchase_pickaxe", pickaxeId: "pick_stone" })).toBe("ok");
+    expect(t.store.getState().view!.state.equippedPickaxe).toBe("pick_stone");
+    expect(await t.controller.perform({ type: "craft", materialId: "reinforce_stone", times: 1 })).toBe("ok");
+    expect(t.store.getState().view!.state.inventory.reinforce_stone).toBe(1);
+    expect(await t.controller.perform({ type: "upgrade_pickaxe", pickaxeId: "pick_stone" })).toBe("ok");
+    expect(t.store.getState().view!.state.pickaxes.pick_stone).toBe(2);
+    expect(t.store.getState().view!.stats.power10).toBe(55);
+
+    // 裝備切換：能力值跟著改變
+    expect(await t.controller.perform({ type: "equip_pickaxe", pickaxeId: "pick_wood" })).toBe("ok");
+    expect(t.store.getState().view!.stats.power10).toBe(20);
+    expect(await t.controller.perform({ type: "equip_pickaxe", pickaxeId: "pick_stone" })).toBe("ok");
+
+    // 不合法的操作由伺服器拒絕，畫面數值不變
+    const before = t.store.getState().view!.state;
+    expect(await t.controller.perform({ type: "purchase_pickaxe", pickaxeId: "pick_gold" })).toBe("rejected");
+    expect(await t.controller.perform({ type: "craft", materialId: "refined_crystal", times: 999 })).toBe("rejected");
+    expect(t.store.getState().view!.state.coins).toBe(before.coins);
+
+    // 成長有效：木製十字鎬在 50 m 卡關（Power 2.0 < 4.0），石製 Lv2（5.5）可以繼續挖
+    await pool.query(`update public.players set frontier_block_index = 500, dig_counter = dig_counter + 500 - frontier_block_index, block_work = 0, block_ms = 0 where id = $1`, [u.userId]);
+    await t.controller.retryBootstrap();
+    expect(t.store.getState().view!.status).toBe("mining");
+    await new Promise((r) => setTimeout(r, 4_000)); // Hardness 較高的方塊：等一段時間後同步
+    await t.controller.sync();
+    expect(t.store.getState().view!.state.mining.blockWork + t.store.getState().view!.state.mining.frontierBlockIndex).toBeGreaterThan(500);
+
+    // 重新登入：伺服器狀態一致
+    const again = browser();
+    await again.auth.signInWithPassword({ email: u.email, password: PASSWORD });
+    const t2 = tab(again);
+    await t2.controller.bootstrap();
+    const s1 = t2.store.getState().view!.state;
+    expect(s1.pickaxes).toMatchObject({ pick_wood: 1, pick_stone: 2 });
+    expect(s1.equippedPickaxe).toBe("pick_stone");
+    const db = await pool.query(`select coins from public.players where id = $1`, [u.userId]);
+    expect(String(s1.coins)).toBe(String(db.rows[0].coins));
+  });
 });
