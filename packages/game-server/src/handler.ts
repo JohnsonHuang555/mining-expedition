@@ -18,6 +18,7 @@ import {
   parseCommand,
   sha256,
   toPlayerView,
+  validateState,
 } from "@mining/game-engine";
 import { type GameDb, GameDbError } from "./db.ts";
 import { base64ToBytes, bytesToHex, utf8 } from "./encoding.ts";
@@ -206,6 +207,12 @@ export async function readState(db: GameDb, playerId: string, options: HandleOpt
   try {
     const snap = await db.loadSnapshot(playerId, null, null);
     if (snap.status !== "ok") return fail(null, "state", "CHARACTER_NOT_FOUND", "create a character first");
+    // 輸出前先驗證：資料庫中的狀態不符合引擎不變式時，回傳受控的 INTERNAL_ERROR（細節只寫 log）
+    const issues = validateState(snap.state);
+    if (issues.length > 0) {
+      log("server_state_error", { playerId, op: "read", issues: issues.slice(0, 5) });
+      return fail(null, "state", "INTERNAL_ERROR", "server state error");
+    }
     const state = snap.state as PlayerGameState;
     return { ok: true, requestId: "state", command: "state", stateVersion: state.stateVersion, state: toPlayerView(state), events: [], settlement: null, report: state.pendingOfflineReport };
   } catch (e) {

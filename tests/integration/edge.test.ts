@@ -268,7 +268,92 @@ describe("Edge Functions：遊戲邏輯", () => {
     expect(r.body).toEqual({ ok: false, requestId: expect.any(String), command: "settle", error: { code: "INTERNAL_ERROR", message: "server state error" } });
     expectNoLeak(r);
     const st = await api("game-state", { method: "GET", token: p.token });
+    expect(st.status).toBe(500);
+    expect(st.body).toMatchObject({ ok: false, error: { code: "INTERNAL_ERROR", message: "server state error" } });
+    expect(st.body).not.toHaveProperty("state");
     expectNoLeak(st);
+  });
+});
+
+describe("Edge Functions：Request body 上限（16 KiB，以 bytes 計）", () => {
+  const MAX = 16 * 1024;
+  const enc = new TextEncoder();
+  /** 恰好 n bytes 的 JSON（以 3-byte 的「中」填充） */
+  function jsonOfBytes(n: number): string {
+    const head = '{"command":{"type":"settle"},"pad":"';
+    const tail = '"}';
+    let room = n - enc.encode(head + tail).length;
+    const cjk = Math.floor(room / 3);
+    room -= cjk * 3;
+    const str = head + "中".repeat(cjk) + "a".repeat(room) + tail;
+    expect(enc.encode(str).length).toBe(n);
+    return str;
+  }
+  async function raw(token: string, body: string | ReadableStream<Uint8Array>, extra: RequestInit = {}): Promise<Call> {
+    const res = await fetch(`${env.functionsUrl}/game-action`, {
+      method: "POST",
+      headers: { apikey: env.anonKey, Authorization: `Bearer ${token}`, "Idempotency-Key": randomUUID(), "Content-Type": "application/json" },
+      body,
+      ...extra,
+    });
+    const text = await res.text();
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      /* gateway 錯誤頁 */
+    }
+    return { status: res.status, headers: res.headers, text, body: parsed };
+  }
+  const logCount = async (id: string) => Number((await pool.query(`select count(*) as n from public.action_log where player_id = $1`, [id])).rows[0].n);
+
+  it("恰好 16 KiB（多位元組中文）會被讀取並驗證（400，不是 413）；多 1 byte → 413", async () => {
+    const p = await newPlayer();
+    const before = await load(p.id);
+    const exact = await raw(p.token, jsonOfBytes(MAX));
+    expect(exact.status).toBe(400);
+    expect(exact.body).toMatchObject({ error: { code: "INVALID_REQUEST", message: "body must be { command } only" } });
+    const over = jsonOfBytes(MAX + 1);
+    expect(over.length).toBeLessThan(MAX); // 字元數低於上限，bytes 超過
+    const r = await raw(p.token, over);
+    expect(r.status).toBe(413);
+    expect(r.body).toMatchObject({ ok: false, error: { code: "INVALID_REQUEST", message: "request body too large" } });
+    expect(await logCount(p.id)).toBe(0);
+    expect(await load(p.id)).toEqual(before);
+  });
+
+  it("大型 body（5 MB，有 Content-Length）與無 Content-Length 的 chunked 串流（4 MB）→ 413；沒有寫入任何資料", async () => {
+    const p = await newPlayer();
+    const before = await load(p.id);
+    const big = await raw(p.token, '{"command":{"type":"settle"},"pad":"' + "x".repeat(5 * 1024 * 1024) + '"}');
+    expect(big.status).toBe(413);
+    let sent = 0;
+    const chunk = enc.encode("x".repeat(64 * 1024));
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(enc.encode('{"command":{"type":"settle"},"pad":"'));
+      },
+      pull(c) {
+        if (sent >= 4 * 1024 * 1024) return c.close();
+        sent += chunk.byteLength;
+        c.enqueue(chunk);
+      },
+    });
+    const chunked = await raw(p.token, stream, { duplex: "half" } as RequestInit);
+    expect(chunked.status).toBe(413);
+    expectNoLeak(chunked);
+    expect(await logCount(p.id)).toBe(0);
+    expect(await load(p.id)).toEqual(before);
+  });
+});
+
+describe("Edge Functions：並行建立角色", () => {
+  it("同一使用者同時送出 5 次 character-create：恰好一次 201，其他 409 CHARACTER_EXISTS", async () => {
+    const u = await createUser();
+    const { accessToken } = await signIn(u.email);
+    const rs = await Promise.all(Array.from({ length: 5 }, () => api("character-create", { token: accessToken })));
+    expect(rs.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409]);
+    for (const r of rs.filter((x) => x.status === 409)) expect(r.body).toMatchObject({ error: { code: "CHARACTER_EXISTS" } });
   });
 });
 

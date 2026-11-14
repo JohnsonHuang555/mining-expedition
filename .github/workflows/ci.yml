@@ -53,6 +53,8 @@ jobs:
       - run: deno check --config supabase/functions/character-create/deno.json supabase/functions/character-create/index.ts
       - run: deno check --config supabase/functions/game-state/deno.json supabase/functions/game-state/index.ts
       - run: deno check --config supabase/functions/game-action/deno.json supabase/functions/game-action/index.ts
+      - name: Edge request body limit (bounded streaming read)
+        run: deno test --no-config supabase/functions/_shared/body_test.ts
       - run: deno check --config packages/game-engine/deno.test.json packages/game-engine/src/index.ts packages/game-engine/test/golden-cli.ts packages/game-engine/bench/settle-bench.ts
       - name: Engine determinism (Deno vs fixture)
         run: deno run --config packages/game-engine/deno.test.json packages/game-engine/test/golden-cli.ts | diff -u packages/game-engine/test/fixtures/golden-v1.json -

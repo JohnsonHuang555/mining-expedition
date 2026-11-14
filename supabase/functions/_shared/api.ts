@@ -9,6 +9,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { type ApiResponse, type GameDb, type HandleResult, httpStatus, supabaseGameDb } from "@mining/game-server";
 import { engineInfo } from "@mining/game-engine";
+import { readJsonBody } from "./body.ts";
 
 const diagnostics = Deno.env.get("EDGE_DIAGNOSTICS") === "true";
 export const MAX_BODY_BYTES = 16 * 1024;
@@ -107,17 +108,12 @@ export function respond(response: ApiResponse, timing: Timing, extra: Partial<Ha
 }
 
 /** 讀取 JSON body（大小上限、必須是物件） */
+/** 讀取 JSON body（逐段讀取，超過 MAX_BODY_BYTES 立即停止並回 413；見 body.ts） */
 export async function readJson(req: Request): Promise<Record<string, unknown> | Response> {
-  const text = await req.text();
-  if (new TextEncoder().encode(text).length > MAX_BODY_BYTES) return errorResponse(413, "INVALID_REQUEST", "request body too large");
-  if (text.trim() === "") return {};
-  try {
-    const v = JSON.parse(text);
-    if (typeof v !== "object" || v === null || Array.isArray(v)) return errorResponse(400, "INVALID_REQUEST", "body must be a JSON object");
-    return v as Record<string, unknown>;
-  } catch {
-    return errorResponse(400, "INVALID_REQUEST", "body must be JSON");
-  }
+  const r = await readJsonBody(req, MAX_BODY_BYTES);
+  if (r.kind === "too_large") return errorResponse(413, "INVALID_REQUEST", "request body too large");
+  if (r.kind === "invalid") return errorResponse(400, "INVALID_REQUEST", r.message);
+  return r.value;
 }
 
 /** 共通的請求包裝：CORS preflight、方法檢查、未預期錯誤遮蔽 */
