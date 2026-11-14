@@ -9,7 +9,7 @@
 | v1.4 | 2026-11-13 | 決策 D18–D22；清除所有阻擋 MVP 的事項；GDD / GBS / TECH 更新至 v1.3；Phase 1 開始 |
 | v1.5 | 2026-11-14 | 決策 D23–D24（離線報告的建立與待領取期間，PR #4 review） |
 
-相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.3、`docs/TECHNICAL_SPEC.md` v1.5、`scripts/balance-sim.ts`
+相關文件：`docs/GDD.md` v1.3、`docs/GBS.md` v1.3.3、`docs/TECHNICAL_SPEC.md` v1.6、`scripts/balance-sim.ts`
 
 ---
 
