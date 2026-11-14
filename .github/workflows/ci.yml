@@ -50,6 +50,9 @@ jobs:
         with:
           deno-version: v2.x
       - run: deno check --config supabase/functions/health/deno.json supabase/functions/health/index.ts
+      - run: deno check --config supabase/functions/character-create/deno.json supabase/functions/character-create/index.ts
+      - run: deno check --config supabase/functions/game-state/deno.json supabase/functions/game-state/index.ts
+      - run: deno check --config supabase/functions/game-action/deno.json supabase/functions/game-action/index.ts
       - run: deno check --config packages/game-engine/deno.test.json packages/game-engine/src/index.ts packages/game-engine/test/golden-cli.ts packages/game-engine/bench/settle-bench.ts
       - name: Engine determinism (Deno vs fixture)
         run: deno run --config packages/game-engine/deno.test.json packages/game-engine/test/golden-cli.ts | diff -u packages/game-engine/test/fixtures/golden-v1.json -
@@ -95,6 +98,9 @@ jobs:
         run: docker compose run --rm -T dev supabase db reset
       - name: Integration tests (real Supabase Local — RLS / RPC / Auth / idempotency / concurrency)
         run: docker compose run --rm -T dev pnpm test:integration
+      - name: Edge Runtime resource events (CPU / memory, if logged)
+        if: always()
+        run: docker logs supabase_edge_runtime_mining-expedition 2>&1 | grep -iE "cpu|memory|shutdown|worker" | tail -40 || true
       - name: diagnose
         if: always()
         run: docker compose run --rm -T dev pnpm diagnose
