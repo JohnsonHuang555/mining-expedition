@@ -84,7 +84,7 @@ describe("Edge Functions：Auth 與輸入驗證", () => {
 
   it("CORS preflight 與方法檢查", async () => {
     const pre = await fetch(`${env.functionsUrl}/game-action`, { method: "OPTIONS", headers: { Origin: "http://localhost:3000", "Access-Control-Request-Method": "POST" } });
-    expect(pre.status).toBe(204);
+    expect(pre.ok, `preflight ${pre.status}`).toBe(true); // gateway 可能回 200，瀏覽器只要求 2xx
     expect(pre.headers.get("access-control-allow-headers")).toContain("idempotency-key");
     expect((await api("game-action", { method: "GET", token: p.token })).status).toBe(405);
     expect((await api("game-state", { method: "POST", token: p.token })).status).toBe(405);

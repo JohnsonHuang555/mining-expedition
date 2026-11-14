@@ -212,6 +212,18 @@ dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲
 - 離線時間以「把測試玩家的時間基準往前移」模擬；正式程式碼沒有任何可以改時間的參數。
 - `pnpm test` 中的 `packages/game-server` 測試用 PGlite（WASM PostgreSQL）套用同一份 migration，可在沒有 Docker 的環境快速執行；但它是單一連線、PG18，**正式驗證以 Supabase Local 為準**（CI 兩者都跑）。
 
+### 遊戲 API（Edge Functions）
+
+`dev pnpm supabase:start` 會一併啟動 Edge Runtime，以下三個函式即可透過 `http://127.0.0.1:54321/functions/v1/<name>` 呼叫（詳細規格見 `docs/TECHNICAL_SPEC.md` §10）：
+
+| 函式 | 方法 | 說明 |
+|---|---|---|
+| `character-create` | POST | 建立角色（空 body） |
+| `game-state` | GET | 讀取目前狀態（唯讀，不結算） |
+| `game-action` | POST | `Idempotency-Key: <uuid>` + `{ "command": { "type": "settle" } }` 等所有改變狀態的操作 |
+
+每個請求都要帶 `Authorization: Bearer <使用者 access token>` 與 `apikey: <anon key>`。玩家身分只取自驗證後的 JWT。`dev pnpm test:integration` 包含 `tests/integration/edge.test.ts`：以 HTTP 呼叫真正的 Edge Runtime，測試權限、冪等、並行、遊戲邏輯，以及 12 小時最壞情境的效能（輸出 `EDGE_BENCHMARK` 一行 JSON）。
+
 `pnpm build` 不需要 Supabase 或 Docker 網路，也可以在任何有 Node 22 與 pnpm 的環境（例如 CI、Vercel）執行。
 
 ### CI（GitHub Actions）
@@ -222,7 +234,7 @@ dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲
 |---|---|
 | install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎涵蓋率門檻（lines ≥ 90%）→ 引擎快照（Node）→ 模擬器 smoke run → `pnpm build`（Node 22，不使用 Docker） |
 | deno check (Edge Functions) / engine determinism | 以 Deno 型別檢查 Edge Function（含匯入 `packages/`）與引擎；Deno 執行引擎快照並與 Node 使用的 fixture 比對 |
-| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`；`supabase db reset`（migration 可從乾淨資料庫重建）；`pnpm test:integration`（真實 Supabase 整合測試）；`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
+| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`；`supabase db reset`（migration 可從乾淨資料庫重建）；`pnpm test:integration`（真實 Supabase 整合測試，含 Edge Functions HTTP 測試與效能實測）；`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
 
 ---
 
