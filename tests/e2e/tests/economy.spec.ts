@@ -76,6 +76,7 @@ test("經濟循環：挖礦 → 出售 → 購買 → 製作 → 強化 → 裝�
   // 8. 成長有效：50 m（木製會卡關）現在可以繼續挖
   await pool.query(`update public.players set frontier_block_index = 500, dig_counter = dig_counter + 500 - frontier_block_index, block_work = 0, block_ms = 0 where id = $1`, [id]);
   await page.getByRole("navigation", { name: "主要功能" }).getByRole("link", { name: /挖礦/ }).click();
+  await expect(page).toHaveURL(/\/$/);
   await page.reload();
   await expect(page.getByTestId("mining-status")).toHaveText("挖掘中");
   await expect(page.getByTestId("mining-position")).toContainText("前線 50 m");
