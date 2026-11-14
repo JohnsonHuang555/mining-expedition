@@ -114,6 +114,27 @@ jobs:
             -e E2E_SCREENSHOT_DIR=screenshots -e CI=1 \
             mcr.microsoft.com/playwright:v1.65.1-noble \
             npx playwright test
+      - name: Production build E2E (next build + next start, same Playwright suite)
+        run: |
+          docker compose stop web   # next dev 與 next build 共用 apps/web/.next，先停止開發伺服器
+          docker compose run -d --name web-prod -T dev sh -c "pnpm --filter @mining/web build && pnpm --filter @mining/web exec next start -H 127.0.0.1 -p 3001"
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:3001/login >/dev/null 2>&1; then echo "production web ready after ${i}x3s"; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' web-prod 2>/dev/null)" != "true" ]; then docker logs web-prod; exit 1; fi
+            sleep 3
+          done
+          curl -fsS http://127.0.0.1:3001/login >/dev/null
+          # 正式 build 不得提供開發用頁面
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/dev/preview)" = "404"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3001/dev)" = "404"
+          docker run --rm --network host --ipc=host \
+            -v "$PWD:$PWD" -w "$PWD/tests/e2e" \
+            -e E2E_BASE_URL=http://127.0.0.1:3001 -e E2E_SCREENSHOT_DIR=screenshots-prod -e CI=1 \
+            mcr.microsoft.com/playwright:v1.65.1-noble \
+            npx playwright test --output=test-results-prod
+      - name: Stop production web
+        if: always()
+        run: docker rm -f web-prod || true
       - name: Print E2E screenshots (base64, for reviewers without artifact access)
         if: always()
         run: |
@@ -131,8 +152,10 @@ jobs:
           name: e2e-screenshots
           path: |
             tests/e2e/screenshots/
+            tests/e2e/screenshots-prod/
             tests/e2e/playwright-report/
             tests/e2e/test-results/
+            tests/e2e/test-results-prod/
           if-no-files-found: ignore
       - name: Edge Runtime resource events (CPU / memory, if logged)
         if: always()

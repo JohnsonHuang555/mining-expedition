@@ -7,10 +7,21 @@
 
 import { createStore } from "zustand/vanilla";
 import type { ArtifactId, ItemId } from "@mining/game-data";
-import type { GameEvent, PlayerStateView, SettleSummary } from "@mining/game-engine";
+import type { GameCommand, GameEvent, PlayerStateView, SettleSummary } from "@mining/game-engine";
+import type { PendingAction } from "./pending";
 
 export type Phase = "booting" | "signed_out" | "no_character" | "ready" | "error";
-export type BusyOp = "bootstrap" | "settle" | "claim" | "mode" | "unlock" | "create" | "refresh";
+export type BusyOp = "bootstrap" | "settle" | "reconcile" | "claim" | "mode" | "unlock" | "create" | "refresh" | "sell" | "buy" | "equip" | "upgrade" | "craft";
+
+/** 一次玩家操作的結果（畫面顯示成功 / 失敗 / 未確認） */
+export interface ActionResult {
+  requestId: string;
+  command: GameCommand["type"];
+  /** ok：伺服器確認成功；rejected：伺服器確認拒絕（沒有任何變更）；uncertain：結果未確認（保留，之後以同一個 requestId 調和） */
+  outcome: "ok" | "rejected" | "uncertain";
+  message: string | null;
+  at: number;
+}
 
 export interface LootEntry {
   /** = digCounter（每個完成的方塊唯一）：同一個回應重送時不會重複顯示 */
@@ -35,6 +46,10 @@ export interface GameUiState {
   /** 收到 view 時的本機時間（performance.now 或注入的時鐘；只用於預測） */
   receivedAt: number;
   busy: BusyOp | null;
+  /** 結果尚未確認的操作（重新整理後也會從 storage 恢復）。存在時不接受其他玩家操作 */
+  pending: PendingAction | null;
+  /** 最近一次玩家操作的結果 */
+  lastAction: ActionResult | null;
   /** 最近一次結算摘要（「最新挖掘成果」） */
   lastSettlement: { summary: SettleSummary; blocks: LootEntry[]; at: number } | null;
   recentLoot: LootEntry[];
@@ -53,6 +68,8 @@ export const initialUiState = (): GameUiState => ({
   fresh: false,
   receivedAt: 0,
   busy: null,
+  pending: null,
+  lastAction: null,
   lastSettlement: null,
   recentLoot: [],
   sync: { ok: true, lastOkAt: null, failures: 0, message: null },
@@ -88,4 +105,9 @@ export function mergeLoot(existing: readonly LootEntry[], incoming: readonly Loo
   const seen = new Set(existing.map((l) => l.key));
   const fresh = incoming.filter((l) => !seen.has(l.key));
   return [...fresh.reverse(), ...existing].sort((a, b) => b.key - a.key).slice(0, RECENT_LOOT_LIMIT);
+}
+
+/** 現在能不能送出新的玩家操作（按鈕的 disabled 條件；Controller 也會再檢查一次） */
+export function canAct(s: Pick<GameUiState, "busy" | "pending" | "view" | "phase">): boolean {
+  return s.phase === "ready" && s.busy === null && s.pending === null && !!s.view && s.view.state.pendingOfflineReport === null;
 }

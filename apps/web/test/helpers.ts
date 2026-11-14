@@ -1,6 +1,7 @@
 import { createGameApi } from "@/lib/game/api";
 import { type Clock, GameController, type SyncChannel } from "@/lib/game/controller";
 import { MemoryBackend } from "@/lib/game/dev/memory-backend";
+import { type PendingStore, memoryPendingStore } from "@/lib/game/pending";
 import { createGameStore } from "@/lib/game/store";
 
 /** 手動推進的時鐘：計時器只在 tick() 時觸發 */
@@ -54,6 +55,10 @@ export function sharedChannel(): () => SyncChannel {
           mine.delete(fn);
         };
       },
+      close: () => {
+        for (const fn of mine) subs.delete(fn);
+        mine.clear();
+      },
     };
   };
 }
@@ -67,10 +72,11 @@ export interface Rig {
   store: ReturnType<typeof createGameStore>;
   signedOut: number;
   refreshes: number;
+  pendingStore: PendingStore;
 }
 
 /** 一個使用者 + 一個分頁（API Client + Store + Controller），後端是記憶體版的 Edge Functions */
-export function rig(opts: { backend?: MemoryBackend; userId?: string; channel?: SyncChannel | null; refresh?: () => string | null } = {}): Rig {
+export function rig(opts: { backend?: MemoryBackend; userId?: string; channel?: SyncChannel | null; refresh?: () => string | null; pendingStore?: PendingStore } = {}): Rig {
   const backend = opts.backend ?? new MemoryBackend();
   const userId = opts.userId ?? crypto.randomUUID();
   let token = backend.addUser(userId);
@@ -90,6 +96,7 @@ export function rig(opts: { backend?: MemoryBackend; userId?: string; channel?: 
       return next;
     },
   });
-  r.controller = new GameController({ api, store, clock, channel: opts.channel ?? null, onSignedOut: () => void r.signedOut!++ });
+  r.pendingStore = opts.pendingStore ?? memoryPendingStore();
+  r.controller = new GameController({ api, store, clock, channel: opts.channel ?? null, pendingStore: r.pendingStore, onSignedOut: () => void r.signedOut!++ });
   return r as Rig;
 }
