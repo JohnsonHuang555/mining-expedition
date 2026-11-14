@@ -42,7 +42,7 @@ test("經濟循環：挖礦 → 出售 → 購買 → 製作 → 強化 → 裝�
   expect(stoneBefore).toBeGreaterThan(100);
   await shot(page, "06-inventory");
   const coins0 = await coinsOf(page);
-  await page.getByLabel("石頭 出售數量").fill("50");
+  await page.getByLabel("石頭 出售數量", { exact: true }).fill("50");
   await page.getByTestId("sell-stone").click();
   await expect(page.getByTestId("action-result")).toContainText("已出售 石頭 ×50，獲得 50 金幣");
   await expect(page.getByTestId("inv-qty-stone")).toHaveText(`×${(stoneBefore - 50).toLocaleString("zh-TW")}`);
