@@ -475,19 +475,44 @@ function defineConcurrency(
       expect(await count("public.action_log", id)).toBe(1);
     });
 
-    it("兩個裝置同時操作（不同 key）：都成功、沒有遺失更新", async () => {
+    it("兩個裝置同時操作（不同 key）：兩個都成功、沒有遺失更新", async () => {
+      const id = await newPlayer();
+      await grant(id, 0, { stone: 100, coal: 100 });
+      for (let round = 0; round < 5; round++) {
+        const [a, c] = await Promise.all([
+          send(id, { type: "sell_items", itemId: "stone", quantity: 10 }),
+          send(id, { type: "sell_items", itemId: "coal", quantity: 10 }),
+        ]);
+        expect(a.response.ok && c.response.ok).toBe(true);
+      }
+      const s = await load(id);
+      expect(s.inventory).toMatchObject({ stone: 50, coal: 50 });
+      expect(s.stateVersion).toBe(10);
+    });
+
+    it("10 個請求同時湧入：超過重試次數的回傳 VERSION_CONFLICT（不保存），Client 以同一個 key 重送後每個都只套用一次", async () => {
       const id = await newPlayer();
       await grant(id, 0, { stone: 1000, coal: 1000 });
-      const rs = await Promise.all([
-        ...Array.from({ length: 5 }, () => send(id, { type: "sell_items", itemId: "stone", quantity: 10 })),
-        ...Array.from({ length: 5 }, () => send(id, { type: "sell_items", itemId: "coal", quantity: 10 })),
-      ]);
+      const jobs = [
+        ...Array.from({ length: 5 }, () => ({ key: randomUUID(), cmd: { type: "sell_items", itemId: "stone", quantity: 10 } })),
+        ...Array.from({ length: 5 }, () => ({ key: randomUUID(), cmd: { type: "sell_items", itemId: "coal", quantity: 10 } })),
+      ];
+      let rs = await Promise.all(jobs.map((j) => send(id, j.cmd, j.key)));
+      expect(rs.some((r) => r.attempts > 1)).toBe(true); // 確實發生過 CAS 衝突並重試
+      for (const r of rs) {
+        if (!r.response.ok) expect(r).toMatchObject({ stored: false, response: { error: { code: "VERSION_CONFLICT" } } });
+      }
+      // Client 對失敗的請求以同一個 key 重送，直到成功
+      for (let round = 0; round < 10 && rs.some((r) => !r.response.ok); round++) {
+        rs = await Promise.all(jobs.map((j, i) => (rs[i]!.response.ok ? rs[i]! : send(id, j.cmd, j.key))));
+      }
       for (const r of rs) expect(r.response.ok).toBe(true);
       const s = await load(id);
-      expect(s.inventory.stone).toBe(950);
-      expect(s.inventory.coal).toBe(950);
+      expect(s.inventory).toMatchObject({ stone: 950, coal: 950 });
       expect(s.stateVersion).toBe(10);
-      expect(rs.some((r) => r.attempts > 1)).toBe(true); // 確實發生過 CAS 衝突並重試
+      const keys = await b().sql<{ k: string }>(`select idempotency_key::text as k from public.action_log where player_id = $1`, [id]);
+      expect(new Set(keys.map((x) => x.k))).toEqual(new Set(jobs.map((j) => j.key)));
+      expect(keys).toHaveLength(10);
     });
 
     it("兩個裝置同時領取同一份報告：只入帳一次", async () => {
