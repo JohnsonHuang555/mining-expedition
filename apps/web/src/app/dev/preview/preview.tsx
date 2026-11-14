@@ -3,7 +3,9 @@
 import { miningPosition } from "@mining/game-engine";
 import { useEffect, useState } from "react";
 import { CreateCharacter } from "@/components/game/CreateCharacter";
-import { Dashboard } from "@/components/game/Dashboard";
+import { GameFrame, MineContent } from "@/components/game/Dashboard";
+import { InventoryPage } from "@/components/game/InventoryPage";
+import { WorkshopPage } from "@/components/game/WorkshopPage";
 import { OfflineReportModal } from "@/components/game/OfflineReportModal";
 import { RuntimeContext, useGame } from "@/components/game/runtime-context";
 import { createGameApi } from "@/lib/game/api";
@@ -13,7 +15,7 @@ import type { GameRuntime } from "@/lib/game/runtime";
 import { createGameStore } from "@/lib/game/store";
 
 const HOUR = 3_600_000;
-const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report"] as const;
+const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report", "economy"] as const;
 type Scene = (typeof SCENES)[number];
 
 async function build(scene: Scene): Promise<GameRuntime> {
@@ -48,9 +50,25 @@ async function build(scene: Scene): Promise<GameRuntime> {
         x.coins = 7_420;
       });
     if (scene === "report") backend.rewind(userId, 5 * HOUR + 17 * 60_000);
+    if (scene === "economy")
+      backend.mutate(userId, (x) => {
+        x.coins = 1_860;
+        x.inventory = { stone: 412, coal: 96, copper: 71, iron_ore: 64, silver: 7, gold: 1, amethyst: 9, iron_ingot: 3, reinforce_stone: 1 };
+        x.pickaxes = { pick_wood: 3, pick_stone: 2 };
+        x.equippedPickaxe = "pick_stone";
+        x.mining.frontierBlockIndex = 620;
+        x.mining.digCounter = 640;
+      });
     await controller.retryBootstrap();
   }
   return { userId, api, store, controller };
+}
+
+function Tab() {
+  const tab = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("tab");
+  if (tab === "inventory") return <InventoryPage />;
+  if (tab === "workshop") return <WorkshopPage />;
+  return <MineContent />;
 }
 
 function Screens() {
@@ -60,7 +78,9 @@ function Screens() {
   if (!view) return <p className="p-6">載入中…</p>;
   return (
     <>
-      <Dashboard email="preview@example.com" onSignOut={() => {}} />
+      <GameFrame email="preview@example.com" onSignOut={() => {}}>
+        <Tab />
+      </GameFrame>
       {view.state.pendingOfflineReport && <OfflineReportModal report={view.state.pendingOfflineReport} />}
     </>
   );

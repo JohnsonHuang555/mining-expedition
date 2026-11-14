@@ -15,7 +15,7 @@
 mining-expedition/
 ├── apps/web/                      # Next.js 16（App Router、Tailwind CSS 4、Zustand）— 部署到 Vercel
 │   └── src/
-│       ├── app/                   # 路由：/（遊戲）、/login、/dev（只在 next dev）
+│       ├── app/                   # 路由：(game)/ → /（挖礦）、/inventory、/workshop；/login；/dev（只在 next dev）
 │       ├── components/            # auth/（登入）、game/（主畫面、離線報告、建立角色）、ui/（像素元件）
 │       └── lib/                   # auth/（Supabase Browser Client、Session）、game/（API Client、Store、同步控制器）
 ├── packages/
@@ -166,7 +166,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 |---|---|---|
 | `GET /api/health` | `{"ok": true}` / 503 `{"ok": false}` | 相同；失敗原因只寫入伺服器日誌 |
 | `GET /api/dev/diagnostics`、`/dev` 的診斷表 | 引擎版本、延遲、錯誤細節 | 404 |
-| `/dev/preview?scene=new\|mining\|blocked_power\|blocked_unlock\|report` | 以記憶體後端（與伺服器相同的 game-server 程式碼）預覽各種畫面，不需要登入 | 不存在（`page.dev.tsx` 不會被 build） |
+| `/dev/preview?scene=new\|mining\|blocked_power\|blocked_unlock\|report\|economy&tab=inventory\|workshop` | 以記憶體後端（與伺服器相同的 game-server 程式碼）預覽各種畫面，不需要登入 | 不存在（`page.dev.tsx` 不會被 build） |
 | `GET /functions/v1/health` | 加上引擎資訊與資料庫細節（`EDGE_DIAGNOSTICS=true`） | 只回傳 `{"ok": boolean}` |
 
 - 所有健康檢查都只使用 anon key 呼叫 `health_ping`（回傳固定的 `{"pong": true}`），不使用 service role，也不回傳 PostgreSQL 版本。
@@ -226,6 +226,7 @@ dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲
 2. 第一次登入顯示「建立礦工」，按「開始探險」。
 3. 挖礦主畫面每 20 秒（或預估方塊完成時）向伺服器同步一次；進度條是本地預估，資源只在同步後出現。
 4. 離開超過 5 分鐘再回來，會先顯示「探險報告」，領取後才繼續挖掘。
+5. 底部導覽的「背包」可以出售礦物；「工坊」可以購買 / 裝備 / 強化十字鎬與製作素材。
 
 想看離線報告不用真的等：在 Studio（<http://127.0.0.1:54323>）或 `psql` 執行
 `update public.players set created_at_ms = created_at_ms - 3*3600000, last_settled_at_ms = last_settled_at_ms - 3*3600000 where id = '<user id>';`

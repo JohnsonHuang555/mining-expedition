@@ -55,6 +55,7 @@ export interface ControllerOptions {
 }
 
 export type ActionOutcome = "ok" | "rejected" | "uncertain" | "blocked";
+type ActionEvents = import("@mining/game-engine").GameEvent[];
 
 const browserClock: Clock = {
   now: () => (typeof performance !== "undefined" ? performance.now() : Date.now()),
@@ -313,13 +314,14 @@ export class GameController {
     this.setPending(action);
     const r = await this.api.action(action.command, action.requestId);
     if (this.disposed) return "uncertain"; // 已登出 / 換帳號：不寫入任何畫面狀態；未確認操作留在該使用者的 storage
-    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null) =>
-      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, at: Date.now() } });
+    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = []) =>
+      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, events, at: Date.now() } });
 
     if (r.ok) {
       this.setPending(null);
       this.applyOk(r);
-      result("ok", null);
+      // 只保留這個操作本身的事件（不含操作前的在線結算方塊）
+      result("ok", null, r.body.events.filter((e) => e.type !== "block_completed" && e.type !== "mining_stopped"));
       return "ok";
     }
     if (isUncertain(r)) {

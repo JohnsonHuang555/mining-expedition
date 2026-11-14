@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.10 | Inventory & Workshop：新增 §12.9 背包 / 工坊 / 製作畫面與路由（`/inventory`、`/workshop`，共用 `(game)` layout）、§12.10 出售價格來源。**遊戲規則、數值、成本、配方與 RNG_VERSION 不變** |
 | v1.9 | Client Reliability：§12.6 未確認操作（Request ID 持久化與調和）、回應結構驗證；新增 §12.8 Runtime 生命週期。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.8 | Playable MVP（Auth + Mining UI）：§12 改為已實作的前端（Zustand store、`predictBlockProgress`、同步排程 20 秒心跳 / 方塊完成時同步（間隔 ≥ 10 秒）、路由 `/`、`/login`），新增 §12.6 API Client 與錯誤處理、§12.7 多分頁。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.7 | Supabase Integration（2/2）：§10.1 / §10.2 改為已實作的 3 個 Edge Function（取代原本一動作一端點的規劃）；新增 §10.7 身分驗證與 verify_jwt 決策、§10.8 Edge Runtime 實測效能。**遊戲規則、數值與 RNG_VERSION 不變** |
@@ -726,6 +727,23 @@ interface GameUiState {
 - 換帳號：其他使用者的 runtime 立即 dispose；`useGameRuntime` 只回傳 userId 相同、未 dispose 的 runtime。
 - `dispose()`：不再寫入 store（進行中的請求回來時直接丟棄）、清除計時器、取消訂閱並關閉 BroadcastChannel。
 - 舊 runtime 的 API Client 只會使用屬於同一個 userId 的 token；換帳號後舊請求不會帶著新使用者的身分送出。
+
+### 12.9 背包 / 工坊 / 製作【v1.10】
+
+- 路由：`app/(game)/layout.tsx` 包住 `/`（挖礦）、`/inventory`（背包）、`/workshop`（工坊與製作）。runtime、同步排程、待領報告視窗都在 layout，切換頁面不會重新登入或重建狀態。
+- 所有成本、價格、配方都取自 `@mining/game-data`（`PICKAXES`、`MATERIALS`、`MINERALS`），畫面只用來顯示與停用按鈕（`lib/game/economy.ts`）；合法性與扣款由伺服器（引擎 `applyAction`）再次確認。
+- 所有交易經 `GameController.perform()`（§12.6 未確認操作 / 冪等）；畫面數值只在伺服器回應後更新，不做 optimistic update。成功 / 失敗 / 未確認以提示列顯示（金額取自伺服器事件）。
+- 出售：指定數量或全部；全部出售（10 個以上）或一次 100 個以上需要確認視窗。
+- 十字鎬：依序購買（購買後自動裝備，P21）、裝備、強化（Lv5 上限）；不足時列出缺少的項目。換裝後挖掘進度依引擎規則處理（P5：保留累積工作量），UI 不重置。
+- 製作：一次 N 份，素材不足則整批失敗（P22）。
+
+### 12.10 出售價格來源【v1.10 確認】
+
+| 對象 | 價格 | 來源 | 本階段 |
+|---|---|---|---|
+| 礦物 / 寶石 | 固定 `MINERALS[id].sellPrice × 數量` | 引擎 `sell_items` | ✅ 開放 |
+| 製作素材 | 不可出售（P16） | 引擎拒絕 | 只顯示 |
+| 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入）；缺少倍率時引擎回 `INVALID_REQUEST` | ❌ 不開放：每日價格排程尚未完成，Client 不假造倍率；留到市場與圖鑑階段 |
 
 ### 12.7 多分頁
 
