@@ -24,6 +24,13 @@ port = 54323
 enabled = true
 site_url = "http://127.0.0.1:3000"
 additional_redirect_urls = ["http://localhost:3000"]
+# MVP：Email / Password 註冊與登入（本地不寄驗證信，註冊後直接登入）。
+# 正式環境（Supabase Cloud）的 Email 驗證在 Dashboard 設定，不讀這個檔案。
+enable_signup = true
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
 
 # 關閉 Analytics（Logflare + Vector）：Vector 需要從宿主掛載 Docker socket（路徑取自 DOCKER_HOST），
 # 但 Docker Desktop 上 DOCKER_HOST 是只存在於開發容器內的代理 socket（docker/entrypoint.sh），

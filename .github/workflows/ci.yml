@@ -37,6 +37,13 @@ jobs:
       - name: Settlement benchmark (12h offline worst case, Node)
         run: node packages/game-engine/bench/settle-bench.ts
       - run: pnpm build
+      - name: Client bundle contains no server secrets
+        run: |
+          set -e
+          if grep -rlE "SUPABASE_SERVICE_ROLE_KEY|SERVICE_ROLE_KEY|rng_secret|player_secrets" apps/web/.next/static; then
+            echo "server-only identifiers found in the browser bundle"; exit 1
+          fi
+          echo "ok: no server-only identifiers in apps/web/.next/static"
 
   # Edge Function 以 Deno 型別檢查（含匯入 supabase/ 以外的 packages/）；
   # 引擎在 Deno 上的確定性快照必須與 Node（Vitest）使用的 fixture 完全相同
@@ -100,6 +107,33 @@ jobs:
         run: docker compose run --rm -T dev supabase db reset
       - name: Integration tests (real Supabase Local — RLS / RPC / Auth / idempotency / concurrency)
         run: docker compose run --rm -T dev pnpm test:integration
+      - name: E2E (Playwright in Docker — browser → Next.js dev → Supabase Local Auth / Edge Functions / Postgres)
+        run: |
+          docker run --rm --network host --ipc=host \
+            -v "$PWD:$PWD" -w "$PWD/tests/e2e" \
+            -e E2E_SCREENSHOT_DIR=screenshots -e CI=1 \
+            mcr.microsoft.com/playwright:v1.65.1-noble \
+            npx playwright test
+      - name: Print E2E screenshots (base64, for reviewers without artifact access)
+        if: always()
+        run: |
+          for f in tests/e2e/screenshots/*.png; do
+            [ -f "$f" ] || continue
+            echo "E2E_SHOT_BEGIN $(basename "$f")"
+            base64 -w 0 "$f" | fold -w 4000
+            echo
+            echo "E2E_SHOT_END"
+          done
+      - name: Upload E2E screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: |
+            tests/e2e/screenshots/
+            tests/e2e/playwright-report/
+            tests/e2e/test-results/
+          if-no-files-found: ignore
       - name: Edge Runtime resource events (CPU / memory, if logged)
         if: always()
         run: docker logs supabase_edge_runtime_mining-expedition 2>&1 | grep -iE "cpu|memory|shutdown|worker" | tail -40 || true

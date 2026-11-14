@@ -109,6 +109,7 @@ export {
   executeRequest,
   parseCommand,
 } from "./request.ts";
+export { type BlockPrediction, predictBlockProgress } from "./predict.ts";
 export { DEV_MARKER } from "./dev-marker.ts";
 
 export const ENGINE_VERSION = "0.3.0";

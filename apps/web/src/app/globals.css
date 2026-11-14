@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/* 像素風地下礦坑主題（暖色系）。不載入外部字型：中文使用系統字型，數字使用等寬字型。 */
+@theme {
+  --color-cave-950: #140b07;
+  --color-cave-900: #21130c;
+  --color-cave-800: #2f1c12;
+  --color-cave-700: #43281a;
+  --color-cave-600: #5c3a26;
+  --color-rock-500: #7a5639;
+  --color-rock-400: #9a7350;
+  --color-parchment: #f3e2bf;
+  --color-parchment-dim: #c9b38c;
+  --color-ember: #f59e0b;
+  --color-gold: #fcd34d;
+  --color-lava: #ea580c;
+  --color-moss: #84cc16;
+  --color-crystal: #a78bfa;
+  --color-danger: #f87171;
+  --font-mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --font-sans: system-ui, -apple-system, "Segoe UI", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    background-color: var(--color-cave-950);
+    background-image:
+      radial-gradient(ellipse at 50% -20%, rgb(245 158 11 / 0.16), transparent 60%),
+      repeating-linear-gradient(0deg, rgb(0 0 0 / 0.18) 0 2px, transparent 2px 4px);
+    color: var(--color-parchment);
+    font-family: var(--font-sans);
+    min-height: 100dvh;
+  }
+  :focus-visible {
+    outline: 2px dashed var(--color-gold);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* 像素邊框：以多層 box-shadow 做出 2px 階梯狀外框 */
+  .pixel-frame {
+    position: relative;
+    background-color: var(--color-cave-800);
+    box-shadow:
+      0 -4px 0 0 var(--color-cave-600),
+      0 4px 0 0 var(--color-cave-600),
+      -4px 0 0 0 var(--color-cave-600),
+      4px 0 0 0 var(--color-cave-600),
+      inset 0 4px 0 0 rgb(255 255 255 / 0.06),
+      inset 0 -4px 0 0 rgb(0 0 0 / 0.35);
+  }
+  .pixel-btn {
+    position: relative;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    box-shadow:
+      0 -3px 0 0 #000,
+      0 3px 0 0 #000,
+      -3px 0 0 0 #000,
+      3px 0 0 0 #000,
+      inset 0 -4px 0 0 rgb(0 0 0 / 0.35),
+      inset 0 3px 0 0 rgb(255 255 255 / 0.25);
+    transition: transform 60ms steps(2);
+  }
+  .pixel-btn:not(:disabled):active {
+    transform: translateY(2px);
+    box-shadow:
+      0 -3px 0 0 #000,
+      0 3px 0 0 #000,
+      -3px 0 0 0 #000,
+      3px 0 0 0 #000,
+      inset 0 3px 0 0 rgb(0 0 0 / 0.35);
+  }
+  .pixel-btn:disabled {
+    filter: grayscale(0.7) brightness(0.7);
+    cursor: not-allowed;
+  }
+  .pixelated {
+    image-rendering: pixelated;
+    shape-rendering: crispEdges;
+  }
+}
+
+@keyframes swing {
+  0%, 100% { transform: rotate(-35deg); }
+  50% { transform: rotate(25deg); }
+}
+@keyframes chip {
+  0% { opacity: 1; transform: translate(0, 0); }
+  100% { opacity: 0; transform: translate(var(--dx, 6px), 10px); }
+}
+@keyframes glint {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 1; }
+}
+@keyframes pop-in {
+  0% { transform: scale(0.6); opacity: 0; }
+  70% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); }
+}
+.animate-swing { animation: swing 0.7s steps(4) infinite; transform-origin: 30% 85%; }
+.animate-chip { animation: chip 0.7s steps(4) infinite; }
+.animate-glint { animation: glint 1.6s steps(3) infinite; }
+.animate-pop { animation: pop-in 0.35s steps(5) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-swing, .animate-chip, .animate-glint, .animate-pop { animation: none; }
+}

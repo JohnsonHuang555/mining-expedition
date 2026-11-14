@@ -31,3 +31,8 @@ packages/**/deno.lock
 .DS_Store
 *.log
 coverage/
+
+# Playwright（E2E）
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/screenshots/
