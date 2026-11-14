@@ -11,6 +11,7 @@
     "build": "pnpm -r --workspace-concurrency=1 run build",
     "typecheck": "pnpm -r run typecheck && tsc -p tsconfig.scripts.json",
     "test": "pnpm -r run test",
+    "test:integration": "pnpm --filter @mining/integration-tests test:integration",
     "check": "pnpm typecheck && pnpm test && pnpm build",
     "supabase:start": "node scripts/check-network.ts && supabase start",
     "supabase:stop": "supabase stop",

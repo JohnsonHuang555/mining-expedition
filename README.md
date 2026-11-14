@@ -16,10 +16,12 @@ mining-expedition/
 ├── apps/web/                      # Next.js 16（App Router）— 部署到 Vercel
 ├── packages/
 │   ├── game-engine/               # 純 TypeScript 遊戲引擎（Web 與 Edge Functions 共用）
-│   └── game-data/                 # 靜態遊戲資料、DATA_VERSION
+│   ├── game-data/                 # 靜態遊戲資料、DATA_VERSION
+│   └── game-server/               # 伺服器協調層：載入快照 → executeRequest → 原子提交（Node / Deno 共用）
+├── tests/integration/             # 真正的 Supabase Local 整合測試（RLS、RPC、冪等、並行）
 ├── supabase/
 │   ├── config.toml                # 本地 Supabase 設定
-│   ├── migrations/                # 資料庫 migration（部署到 Supabase Cloud）
+│   ├── migrations/                # 資料庫 migration：玩家 schema、RLS、RPC（部署到 Supabase Cloud）
 │   └── functions/health/          # Edge Function（部署到 Supabase Cloud）
 ├── scripts/
 │   ├── balance-sim.ts             # 平衡模擬（開發輔助工具）
@@ -188,7 +190,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 
 ```bash
 dev pnpm typecheck   # 所有 packages、apps 與 scripts 的型別檢查
-dev pnpm test        # Vitest（packages/game-engine：資料一致性、定點數、亂數、數值、挖掘、掉落、首次保護判定、確定性快照）
+dev pnpm test        # Vitest：game-engine（規則）＋ game-server（PGlite 上的真實 migration：RPC、RLS、冪等；不需要 Docker）
 dev pnpm build       # 依序建置所有 workspace（packages 型別檢查 + next build）
 dev pnpm check       # 以上三項
 dev pnpm --filter @mining/game-engine coverage   # 引擎涵蓋率（門檻見 packages/game-engine/vitest.config.ts）
@@ -196,6 +198,19 @@ dev pnpm sim         # 平衡模擬（使用正式的 settle / applyAction；全
 ```
 
 引擎的確定性快照在 `packages/game-engine/test/fixtures/golden-v1.json`。Node（Vitest）與 Deno（CI）都必須產生完全相同的結果；只有 `RNG_VERSION` 或 `DATA_VERSION` 改變時才重新產生（`node packages/game-engine/test/golden-cli.ts > …/golden-v<N>.json`，舊快照保留）。
+
+### 資料庫整合測試（真正的 Supabase Local）
+
+需要先依「第一次啟動」執行 `dev pnpm supabase:start`。測試會自動從 `supabase status` 取得 URL 與金鑰（只在開發容器內使用，不寫入任何檔案）。
+
+```bash
+dev supabase db reset        # 從乾淨的資料庫重新套用所有 migration（會清除本地資料）
+dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲邏輯持久化
+```
+
+- 測試以 Auth admin API 建立真實使用者並登入取得 JWT，經由 PostgREST 驗證權限；以 postgres 連線（`supabase status` 的 `DB_URL`）準備資料與檢查結果。
+- 離線時間以「把測試玩家的時間基準往前移」模擬；正式程式碼沒有任何可以改時間的參數。
+- `pnpm test` 中的 `packages/game-server` 測試用 PGlite（WASM PostgreSQL）套用同一份 migration，可在沒有 Docker 的環境快速執行；但它是單一連線、PG18，**正式驗證以 Supabase Local 為準**（CI 兩者都跑）。
 
 `pnpm build` 不需要 Supabase 或 Docker 網路，也可以在任何有 Node 22 與 pnpm 的環境（例如 CI、Vercel）執行。
 
@@ -207,7 +222,7 @@ dev pnpm sim         # 平衡模擬（使用正式的 settle / applyAction；全
 |---|---|
 | install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎涵蓋率門檻（lines ≥ 90%）→ 引擎快照（Node）→ 模擬器 smoke run → `pnpm build`（Node 22，不使用 Docker） |
 | deno check (Edge Functions) / engine determinism | 以 Deno 型別檢查 Edge Function（含匯入 `packages/`）與引擎；Deno 執行引擎快照並與 Node 使用的 fixture 比對 |
-| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`、`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
+| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`；`supabase db reset`（migration 可從乾淨資料庫重建）；`pnpm test:integration`（真實 Supabase 整合測試）；`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
 
 ---
 

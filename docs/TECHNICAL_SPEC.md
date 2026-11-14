@@ -1,6 +1,6 @@
 # 《挖礦探險隊》TECHNICAL_SPEC
 
-**Version 1.5（MVP v1.0 基準）**
+**Version 1.6（MVP v1.0 基準）**
 
 | 版本 | 變更 |
 |---|---|
@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.6 | Supabase Integration（1/2）：§8.2–§8.5 依實作的 schema 更新（與 v1.5 草稿的差異見 §8.6）；§10.4 RPC 名稱與流程；§10.6 回應保存規則；§14.5 真實 Supabase Local 整合測試。**遊戲規則、數值與 RNG_VERSION 不變** |
 
 | 項目 | 內容 |
 |---|---|
@@ -392,33 +393,74 @@ executeRequest(state, { requestId, command }, ctx):
 - `depthBlockIndex` → `band` + `frontierBlockIndex`（回訪 / 重挖沒有單一 blockIndex）。
 - `collection` → `discoveredArtifacts`；`pendingReportId` → `pendingOfflineReport`（完整報告）。
 
-### 8.2 資料表（schema `public`，Client 唯讀）
+### 8.2 資料表（schema `public`，Client 只能讀自己的資料）
 
-| 資料表 | 主鍵 | 主要欄位 | 備註 |
+Migration：`supabase/migrations/20261114000000_player_schema.sql`（schema、約束、RLS）、`20261114000100_player_rpc.sql`（RPC）。
+
+```text
+auth.users ─1:1─ players ─1:1─ private.player_secrets
+                    ├─1:1─ first_treasure
+                    ├─1:N─ player_pickaxes        (players.equipped_pickaxe → player_pickaxes，deferrable FK)
+                    ├─1:N─ player_inventory
+                    ├─1:N─ artifact_instances     (held / sold)
+                    ├─1:N─ artifact_discoveries
+                    ├─1:N─ offline_reports        (每位玩家最多 1 份 pending)
+                    └─1:N─ action_log             (unique player_id + idempotency_key)
+market_prices（全域，依日期）
+```
+
+| 資料表 | 主鍵 | 主要欄位 | 約束 |
 |---|---|---|---|
-| `players` | `id`（= `auth.uid()`） | `name`、`appearance`、`coins bigint`、`equipped_pickaxe`、`version int`、`data_version int`、`created_at` | `name` 唯一性：待確認 C-3 |
-| `mining_state` | `player_id` | 對應 `PlayerGameState.mining` 的各欄位（含 `mode`、`rework_band`）、`pending_report_id` | 一對一 |
-| `first_treasure` | `player_id` | `status`（check in pending / obtained / granted）、`effective_mining_ms bigint`、`resolved_at`、`artifact_instance_id` | 一對一；`status` 只能從 `pending` 轉出一次（RPC 檢查 + trigger 禁止改回） |
-| `player_pickaxes` | `(player_id, pickaxe_id)` | `level smallint` | |
-| `zone_unlocks` | `(player_id, zone_id)` | `unlocked_at` | |
-| `inventory_items` | `(player_id, item_id)` | `quantity bigint check ≥ 0` | |
-| `artifact_instances` | `id uuid` | `player_id`、`artifact_id`、`discovered_at`、`depth_block_index`、`source_report_id` | 出售即刪除；出售紀錄寫入 `action_log` |
-| `collection_records` | `(player_id, artifact_id)` | `first_discovered_at`、`first_depth_block_index`、`total_found` | 永不刪除 |
-| `offline_reports` | `id uuid` | `player_id`、`period_start`、`period_end`、`simulated_ms`、`discarded_ms`、`depth_from`、`depth_to`、`blocks_mined`、`stop_reason`、`rewards jsonb`、`status`（`pending` / `claimed`）、`created_at`、`claimed_at` | 部分唯一索引：每位玩家最多一筆 `pending` |
-| `action_log` | `id bigserial` | `player_id`、`idempotency_key uuid`、`kind`、`request_hash`、`response jsonb`、`created_at` | `unique (player_id, idempotency_key)` |
-| `market_prices` | `(price_date, artifact_id)` | `multiplier_ppm int` | 每日一筆 |
+| `players` | `id`（= `auth.users.id`，on delete cascade） | `state_version`、`schema_version`、`data_version`、`rng_version`、`created_at_ms`、`last_settled_at_ms`、`coins`、`equipped_pickaxe`、`unlocked_zone`、`mining_mode`、`revisit_zone`、`rework_band`、`frontier_block_index`、`dig_counter`、`block_work`、`block_ms`、`last_claimed_report_id` | 模式與 `revisit_zone` / `rework_band` 一致；`dig_counter ≥ frontier_block_index`；前線不超過未解鎖礦區；`block_work` 與 `block_ms` 同時為 0 |
+| `player_pickaxes` | `(player_id, pickaxe_id)` | `level` 1–5 | ID 清單 check；RPC 禁止刪除或降級 |
+| `player_inventory` | `(player_id, item_id)` | `quantity` ≥ 1 | ID 清單 check；數量 0 時刪除列 |
+| `artifact_instances` | `(player_id, instance_id)` | `artifact_id`、`obtained_at_ms`、`mode`、`band`、`frontier_block_index`、`dig_counter`、`source`、`status`（held / sold）、`sold_at_ms`、`source_report_id` | `instance_id = 'd' ‖ dig_counter`；已出售的實例保留，不能重新出現 |
+| `artifact_discoveries` | `(player_id, artifact_id)` | `first_discovered_at_ms`、`first_band`、`total_found` | 永不刪除；首次紀錄不可變；`total_found` 不可減少（RPC 檢查） |
+| `first_treasure` | `player_id` | `status`、`effective_mining_ms`、`resolved_at_ms`、`artifact_instance_id`、`report_id` | trigger：只能從 pending 轉出一次，之後結果不可變（`report_id` 只能清除）；有效時間不可減少 |
+| `offline_reports` | `(player_id, report_id)` | `status`（pending / claimed）、`period_start_ms`、`period_end_ms`、`blocks_mined` ≥ 1（D23）、`coins`、`report jsonb`（完整 `OfflineReport`）、`claimed_at_ms` | 部分唯一索引 `(player_id) where status = 'pending'` |
+| `action_log` | `id` | `player_id`、`idempotency_key uuid`、`request_hash`（SHA-256 hex）、`command`、`committed`、`state_version_after`、`response jsonb` | `unique (player_id, idempotency_key)` |
+| `market_prices` | `(price_date, artifact_id)` | `multiplier_ppm` 700,000–1,500,000 | 每日排程在之後的 PR |
 
-### 8.3 私有資料（schema `private`，Client 無權存取）
+### 8.3 私有資料與權限
 
-| 資料表 | 欄位 |
+| 對象 | 權限 |
 |---|---|
-| `private.player_secrets` | `player_id`、`rng_secret bytea` |
+| `private.player_secrets`（`rng_secret bytea`，長度 32） | anon / authenticated / **service_role 都沒有權限**；`private` schema 不在 PostgREST 公開清單中。只有 `game_load_snapshot`（security definer）讀取；密鑰在 `game_create_player` 內以 `extensions.gen_random_bytes(32)` 產生，不經過應用程式 |
+| 玩家資料表（`players` 等 7 張） | authenticated：只有 SELECT，RLS `player_id = auth.uid()`；anon：沒有權限；任何 Client 都不能 INSERT / UPDATE / DELETE |
+| `action_log` | Client 沒有權限（回應快照只由 API 回傳） |
+| `market_prices` | authenticated：SELECT 全部 |
+| RPC `game_create_player`、`game_load_snapshot`、`game_commit` | 只有 service_role 可以 EXECUTE（收回 Supabase 預設給 public / anon / authenticated 的權限） |
+| `private.*` 函式 | 沒有任何角色可直接呼叫 |
 
 ### 8.4 約束
 
-- 所有數量欄位 `check (>= 0)`，作為最後防線。
-- `offline_reports`：`create unique index on offline_reports(player_id) where status = 'pending'`。
-- `action_log`：`unique (player_id, idempotency_key)`。
+- 所有數量 / 時間 / 工作量欄位為 `bigint`，並以 check 限制在 `0 … 2^53 − 1`；超出、小數、錯型別的值在寫入時被拒絕，整個交易 rollback。
+- 遊戲 ID 以 check 清單限制（GBS §24：只能新增；新增 ID 需要新的 migration）。`packages/game-server/test/schema-ids.test.ts` 檢查清單與 `@mining/game-data` 一致。
+- 每位玩家最多一份 pending 報告；`action_log` 的 `(player_id, idempotency_key)` 唯一；寶物實例 `(player_id, instance_id)` 唯一。
+
+### 8.5 bigint / JSONB / TypeScript 數值轉換
+
+| 路徑 | 策略 |
+|---|---|
+| TS → DB | 引擎只產生 safe integer（`validateState`）；RPC 以 `(jsonb ->> 'x')::bigint` 轉換，小數或超過 bigint 會直接錯誤，超過 `2^53 − 1` 會被 check 拒絕 |
+| DB → TS | RPC 以 `jsonb_build_object` 組出 `PlayerGameState`；`bigint` 轉成 JSON number。因為 check 保證 ≤ `2^53 − 1`，`JSON.parse` 一定精確 |
+| 時間 | 遊戲時間存毫秒 `bigint`（`*_at_ms`），不經過 `timestamptz` 的微秒換算；`timestamptz` 欄位只作稽核 |
+| 直接 SQL（pg driver） | `bigint` 會回傳字串；只有測試與維運腳本使用，遊戲路徑一律經由 RPC 的 JSON |
+| 往返測試 | 整合測試：所有操作後「資料庫載入的狀態 = 引擎提交的狀態」；`2^53 − 1` 可往返；`2^53`、小數、負數被拒絕且 rollback |
+
+### 8.6 與 v1.5 草稿的差異
+
+| v1.5 草稿 | 實作 | 原因 |
+|---|---|---|
+| `mining_state` 獨立資料表 | 併入 `players` | 一對一、每次提交都會改；少一個 join 與一列鎖 |
+| `pending_report_id` 欄位 | 由 `offline_reports` 的部分唯一索引決定 | 避免兩個來源不一致 |
+| `zone_unlocks` 資料表 | `players.unlocked_zone` | 解鎖必須依序（D10），單一數字即可表示 |
+| `inventory_items` / `collection_records` | `player_inventory` / `artifact_discoveries` | 依本階段需求命名 |
+| `artifact_instances` 出售即刪除、主鍵 uuid | 保留並標記 `sold`、主鍵 `(player_id, instance_id)` | 防止同一個 ID 被重新建立；實例 ID 由方塊序號決定（§8.1） |
+| `load_player_snapshot` / `commit_player_state` | `game_load_snapshot` / `game_commit`（另有 `game_create_player`） | 以 `game_` 前綴區分遊戲 RPC |
+| 密鑰由 Edge Function 產生 | 資料庫 `gen_random_bytes(32)` 產生 | 密鑰不經過應用程式 |
+| `players.name` / `appearance` | 尚未加入 | 角色名稱規則待確認（C-3），不影響遊戲狀態；UI 階段加入 |
+| `timestamptz` 時間 | 毫秒 `bigint` | 與引擎時間完全相同，不需換算 |
 
 ---
 
@@ -485,28 +527,31 @@ type ApiResponse<T> =
 
 ### 10.4 提交流程
 
+協調層：`packages/game-server` 的 `handleGameRequest(db, { playerId, requestId, command })`（Node 與 Deno 共用）。
+
 ```mermaid
 sequenceDiagram
     participant C as Client
     participant EF as Edge Function
     participant DB as Postgres
-    C->>EF: POST pickaxe-buy (Idempotency-Key)
-    EF->>DB: rpc load_player_snapshot(player_id, idem_key)
-    DB-->>EF: snapshot + server_now（若 key 已存在，直接回傳先前的 response）
-    EF->>EF: settle(snapshot, server_now) → 執行動作 → 產生 patch
-    EF->>DB: rpc commit_player_state(player_id, expected_version, idem_key, patch, response)
-    alt version 相符
-        DB-->>EF: ok（同一交易內：寫入 patch、version+1、寫入 action_log）
-    else version 不符
-        DB-->>EF: VERSION_CONFLICT → EF 從頭重試（最多 3 次）
+    C->>EF: POST（JWT、Idempotency-Key、command）
+    EF->>EF: 驗證 JWT → playerId（不採用 body 中的任何 id）
+    EF->>DB: rpc game_load_snapshot(player_id, key, request_hash)
+    DB-->>EF: replay / mismatch / not_found / ok（state、rngSecret、serverNow、market）
+    EF->>EF: executeRequest(state, { requestId, command }, { serverNow, rng, market })
+    EF->>DB: rpc game_commit(player_id, expected_version, key, hash, command, state|null, reportCreated, reportClaimed, response)
+    alt committed / recorded / replay
+        DB-->>EF: 同一交易：鎖定玩家列 → 冪等 → CAS → 寫入所有資料表 → 報告 → action_log
+    else version_conflict
+        DB-->>EF: 以同一個 key 重新載入最新快照與資料庫時間、重新計算（最多 3 次）
     end
-    EF-->>C: ApiResponse
+    EF-->>C: ApiResponse（公開狀態；不含密鑰或內部錯誤）
 ```
 
-- `load_player_snapshot` 與 `commit_player_state` 都是 `security definer`，只授權給 `service_role`。
-- `server_now` 取自 Postgres `now()`，作為唯一時間來源。
-- 同一個 `Idempotency-Key` 重送時，回傳 `action_log` 中儲存的回應，不再執行。
-- 領取報告時，在同一交易中：檢查 `status = 'pending'` → 改為 `claimed` → 寫入獎勵 → 清除 `pending_report_id`。
+- `game_*` RPC 都是 `security definer`、`search_path = ''`，只授權給 `service_role`。
+- `serverNow` 取自 Postgres `now()`（毫秒），是唯一時間來源。
+- `game_commit` 先 `select … for update` 鎖定玩家列：同一位玩家的提交依序執行，同一個 key 並行送出時，後到的請求會看到先到的紀錄並回傳同一個回應。
+- 交易中任何一步失敗（型別、約束、報告不是 pending、狀態與報告表不一致）都會整個 rollback，也不會留下 `action_log`。
 
 ### 10.5 離線報告領取流程 【決策 D20】
 
@@ -555,6 +600,7 @@ sequenceDiagram
 | 報告領取 | `commit.reportClaimed`：同一交易鎖定報告列，只有 `pending` 才改為 `claimed` 並寫入獎勵、清除 `pending_report_id` |
 | 必須原子提交 | 金幣、物品、寶物實例（新增 / 出售刪除）、圖鑑、十字鎬、礦區、挖掘狀態（含 `digCounter`、`lastSettledAt`）、首次保護、報告狀態、`action_log`、`version` |
 | 操作失敗 | 操作沒有任何效果；若結算有變化（例如剛產生報告）`commit.actionApplied = false`，結算結果仍提交 |
+| 回應保存（實作） | `commit ≠ null`：狀態與回應同一交易提交（`committed = true`）。`commit = null`（無變化、或遊戲規則拒絕且結算沒有變化）：只保存回應（`committed = false`），保存前同樣做 CAS，確保回應根據最新狀態計算。**不保存**：`IDEMPOTENCY_MISMATCH`、`VERSION_CONFLICT`（重試用盡）、資料庫錯誤、伺服器狀態異常，Client 可以用同一個 key 重試 |
 | 寶物實例 | 主鍵 `(player_id, instance_id)`；`instance_id = "d" + digCounter`，同一方塊不會產生兩個實例 |
 
 ## 11. 安全
@@ -750,7 +796,19 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 | 防卡死：金幣 0、背包全空的帳號在每個門檻 | 都能透過重挖或回訪恢復（對應 GBS §21） |
 | RLS | `authenticated` 無法寫入任何遊戲資料表、無法讀取他人資料、無法讀取 `private` |
 
-整合測試需要能注入伺服器時間：僅在測試環境中，RPC 接受 `p_now_override` 參數；正式環境禁用。【提案 T12】
+時間：**不在 RPC 加入任何時間覆寫參數**（T12 改為下列做法）。測試以 postgres superuser 把玩家的時間基準往前移（`created_at_ms`、`last_settled_at_ms`，等同玩家離開了一段時間），正式程式碼沒有任何可以改時間的路徑。有待領取報告時不倒轉時間（報告內容固定），D24 的等待以實際等待驗證。
+
+實作（PR #5）：`tests/integration/`，在 CI 的 docker job 中於真正啟動的 Supabase Local（PostgREST + PostgreSQL 17 + Auth）上執行；同一組情境也在本機以 PGlite 執行（`packages/game-server/test/`，單一連線、不含並行）。
+
+| 分類 | 測試 |
+|---|---|
+| Auth / RLS（真實 JWT 經 PostgREST） | anon 讀不到任何玩家資料；A 只讀得到自己、讀不到 B；Client 不能改金幣 / 物品 / 深度 / 裝備 / 報告 / 首次保護 / 市場價格、也不能改別人的資料；讀不到密鑰（service_role 經 PostgREST 也讀不到）與 action_log；anon / authenticated 不能呼叫 `game_*` RPC；回應與 action_log 不含密鑰 |
+| 冪等 / CAS | 同 key 同指令只套用一次；同 key 不同指令 `IDEMPOTENCY_MISMATCH`；遊戲規則拒絕也保存回應；`commit = null` 只保存回應；注入競爭提交 → 重試 1 次後成功；持續競爭 → 3 次後 `VERSION_CONFLICT` 且不保存，同一個 key 再試成功 |
+| 交易 | 約束違反時整個 rollback（狀態、寶物、action_log 都沒有變化）；已出售實例不能重新出現；圖鑑不能刪除或減少 |
+| 並行（多連線） | 同一個 key 同時 8 次只套用一次；兩個裝置同時操作沒有遺失更新；10 個請求同時湧入 + Client 以同一 key 重送 → 每個只套用一次；同時領取同一份報告只入帳一次；逾時重送、回應遺失後重送 |
+| 遊戲邏輯 | 初始角色；完整往返（結算、報告、購買、製作、強化、出售、裝備）；safe integer 邊界；與 golden fixture 一致；伺服器結果 = 相同快照的純引擎計算；12 小時離線（30 小時 → 模擬 12 小時）；D23；D24；解鎖與模式切換持久化；重新載入後一致 |
+
+尚未涵蓋（下一個 PR：Edge Functions）：HTTP 層（JWT 驗證、Idempotency-Key header、錯誤碼對應）、Edge Runtime 實測效能、`DATA_VERSION` 升版後領取報告。
 
 ### 14.6 效能基準
 
@@ -857,7 +915,7 @@ flowchart LR
 | T6–T8 | 定點數、亂數、市場實作細節（依本文件實作，測試時確認） |
 | T9 | 結算排程參數（5 秒 / 60 秒 / 300 秒） |
 | T10 | 單頁 Tab 路由 |
-| T12 | 測試環境可注入伺服器時間 |
+| T12 | ~~測試環境可注入伺服器時間~~ → 改為測試中倒轉玩家的時間基準，正式程式碼不提供時間覆寫（§14.5，PR #5），待審核 |
 | T13 | 是否加入 Playwright E2E |
 | T14 | Supabase CLI 是否升級到 v3（目前固定 v2.122.1，§15.1） |
 | T15 | Edge Function 匯入 `packages/`：Linux（CI）上 `supabase start` 已確認可行；Docker Desktop 待驗證（`docs/PHASE1_ACCEPTANCE.md`） |
