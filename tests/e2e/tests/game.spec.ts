@@ -114,8 +114,13 @@ test("Session 失效（token 被撤銷）→ 回到登入頁並提示重新登�
   // 撤銷這個使用者的所有 session（等同在其他地方登出全部裝置 / refresh token 過期）
   await pool.query(`delete from auth.sessions where user_id = $1`, [await userId(email)]);
   await pool.query(`delete from auth.refresh_tokens where user_id = $1::text`, [await userId(email)]);
-  await page.getByRole("button", { name: "立即同步" }).click();
+  // 自動同步可能已經先發現 session 失效並導向登入頁；沒有的話手動觸發一次同步
+  await page
+    .getByRole("button", { name: "立即同步" })
+    .click({ timeout: 5_000 })
+    .catch(() => {});
   await expect(page).toHaveURL(/\/login/);
+  await expect(page.getByRole("button", { name: "進入礦坑" })).toBeVisible();
 });
 
 test("多分頁：一個分頁領取報告後，另一個分頁也更新", async ({ context }) => {

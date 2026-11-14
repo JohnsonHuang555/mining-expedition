@@ -114,6 +114,16 @@ jobs:
             -e E2E_SCREENSHOT_DIR=screenshots -e CI=1 \
             mcr.microsoft.com/playwright:v1.65.1-noble \
             npx playwright test
+      - name: Print E2E screenshots (base64, for reviewers without artifact access)
+        if: always()
+        run: |
+          for f in tests/e2e/screenshots/*.png; do
+            [ -f "$f" ] || continue
+            echo "E2E_SHOT_BEGIN $(basename "$f")"
+            base64 -w 0 "$f" | fold -w 4000
+            echo
+            echo "E2E_SHOT_END"
+          done
       - name: Upload E2E screenshots and report
         if: always()
         uses: actions/upload-artifact@v4
