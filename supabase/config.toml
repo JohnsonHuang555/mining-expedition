@@ -43,3 +43,14 @@ EDGE_DIAGNOSTICS = "true"
 # 健康檢查：不需要登入。正式環境只回傳 {"ok": boolean}
 [functions.health]
 verify_jwt = false
+
+# 遊戲 API：由函式內的 auth.getUser(JWT) 驗證身分（每個請求都驗證，是唯一的安全邊界）。
+# 不使用 gateway 的 verify_jwt，因為它會擋掉瀏覽器不帶 Authorization 的 CORS preflight（OPTIONS）。
+[functions.character-create]
+verify_jwt = false
+
+[functions.game-state]
+verify_jwt = false
+
+[functions.game-action]
+verify_jwt = false

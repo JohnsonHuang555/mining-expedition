@@ -447,6 +447,16 @@ export function defineScenarios(getBackend: () => Backend): void {
       const view2 = await readState(b().db, id);
       expect(view2).toEqual(view1);
     });
+
+    it("讀取狀態：資料庫狀態不符合引擎不變式時回傳受控的 INTERNAL_ERROR（不是 SERVER_BUSY）", async () => {
+      const id = await newPlayer();
+      await b().sql(`insert into public.player_pickaxes values ($1, 'pick_iron', 1)`, [id]);
+      const logs: unknown[] = [];
+      const r = await readState(b().db, id, { log: (e, d) => logs.push({ e, d }) });
+      expect(r).toMatchObject({ ok: false, error: { code: "INTERNAL_ERROR", message: "server state error" } });
+      expect(r).not.toHaveProperty("state");
+      expect(logs).toHaveLength(1);
+    });
   });
 
   if (getBackend().concurrent) defineConcurrency(b, newPlayer, send, load, grant, rewind, count);
@@ -462,7 +472,15 @@ function defineConcurrency(
   count: (t: string, p: string, w?: string) => Promise<number>,
 ): void {
   describe("並行（多連線）", () => {
-    it("同一個 key 同時送出 8 次：只套用一次，其他得到同一個回應", async () => {
+  it("同一玩家同時建立角色 5 次：恰好一次 created，其他都是 CHARACTER_EXISTS（沒有 SERVER_BUSY）", async () => {
+    const id = await b().newUser();
+    const rs = await Promise.all(Array.from({ length: 5 }, () => createCharacter(b().db, id)));
+    expect(rs.filter((r) => r.ok)).toHaveLength(1);
+    for (const r of rs.filter((x) => !x.ok)) expect(r).toMatchObject({ error: { code: "CHARACTER_EXISTS" } });
+    expect(await b().sql(`select count(*)::int as n from private.player_secrets where player_id = $1`, [id])).toEqual([{ n: 1 }]);
+  });
+
+  it("同一個 key 同時送出 8 次：只套用一次，其他得到同一個回應", async () => {
       const id = await newPlayer();
       await grant(id, 1000, { stone: 100 });
       const key = randomUUID();

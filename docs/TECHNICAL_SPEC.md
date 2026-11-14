@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.7 | Supabase Integration（2/2）：§10.1 / §10.2 改為已實作的 3 個 Edge Function（取代原本一動作一端點的規劃）；新增 §10.7 身分驗證與 verify_jwt 決策、§10.8 Edge Runtime 實測效能。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.6 | Supabase Integration（1/2）：§8.2–§8.5 依實作的 schema 更新（與 v1.5 草稿的差異見 §8.6）；§10.4 RPC 名稱與流程；§10.6 回應保存規則；§14.5 真實 Supabase Local 整合測試。**遊戲規則、數值與 RNG_VERSION 不變** |
 
 | 項目 | 內容 |
@@ -477,36 +478,25 @@ market_prices（全域，依日期）
 
 ### 10.1 共通規則
 
-- 所有 API 都是 Supabase Edge Function，`POST`，需要 Supabase Auth JWT。
-- 所有改變狀態的請求都必須帶 `Idempotency-Key: <uuid>` header。
-- 回應格式：
-
-```ts
-type ApiResponse<T> =
-  | { ok: true; state: PlayerStateView; data: T; events?: GameEvent[] }
-  | { ok: false; error: { code: ErrorCode; message: string }; state?: PlayerStateView };
-```
-
-- **每個動作都先結算到現在**，再執行動作，並在同一次提交中寫入。這保證「購買」發生在確定的時間點。
-- 有待領取的離線報告時，除了 `report-claim`，其他改變狀態的 API 都回傳 `REPORT_PENDING`。
+- 所有 API 都是 Supabase Edge Function，需要 `Authorization: Bearer <Supabase Auth access token>`（以及 gateway 需要的 `apikey: <anon key>`）。
+- 玩家身分**只**來自函式內以 `auth.getUser(jwt)` 驗證後的 user id；body / query 不接受 `playerId`，多出的欄位一律 `400 INVALID_REQUEST`。
+- 改變狀態的請求（`game-action`）必須帶 `Idempotency-Key: <uuid>` header；冪等由資料庫 `action_log (player_id, idempotency_key)` 保證，不依賴前端。
+- 回應即 `@mining/game-server` 的 `ApiResponse`（成功：`{ ok: true, requestId, command, state: PlayerView, events, settlement, report, ... }`；失敗：`{ ok: false, requestId, command, error: { code, message }, state? }`）。HTTP 狀態由 `httpStatus()` 決定（200 / 201 / 400 / 401 / 404 / 405 / 409 / 422 / 500 / 503）。
+- 每個回應都有 `X-Engine-Version`；`game-action` 另有 `Idempotent-Replayed: true|false`。
+- **每個動作都先結算到現在**（伺服器時間 = 資料庫 `now()`），再執行動作，並在同一次 `game_commit` 交易中寫入。
+- 有待領取的離線報告時，除了 `claim_report`，其他改變狀態的指令都回傳 `REPORT_PENDING`（D24）。
+- 錯誤訊息是固定的通用文字；SQL 錯誤、資料表名稱、堆疊、金鑰都只寫入伺服器 log。
 
 ### 10.2 端點
 
-| 端點 | 請求 | 說明 |
-|---|---|---|
-| `character-create` | `{ name, appearance }` | 建立角色、初始狀態（木製十字鎬 Lv1，D10）與 `rng_secret`；只能一次 |
-| `state-get` | `{}` | 結算到現在並回傳完整狀態（登入時呼叫；可能產生離線報告） |
-| `mining-settle` | `{}` | 結算到現在；回傳在線事件或離線報告 |
-| `report-claim` | `{ reportId }` | 領取報告，一次入帳 |
-| `mining-select` | `{ mode, zone? }` | 切換前線 / 回訪 / 重挖。回訪的 zone 必須已解鎖且比前線所在礦區淺，主線完成後可選全部（D15）；重挖只在前線卡關時可用，深度帶由伺服器計算，不接受 Client 指定（D16） |
-| `zone-unlock` | `{ zone }` | 前線已挖完上一區底部時，付費解鎖（D10、GBS §12） |
-| `pickaxe-buy` | `{ pickaxeId }` | 購買下一階十字鎬，必須依序（D10、GBS §10） |
-| `pickaxe-equip` | `{ pickaxeId }` | 切換已擁有的十字鎬 |
-| `pickaxe-upgrade` | `{ pickaxeId }` | 強化一級 |
-| `craft` | `{ recipeId, times }` | 製作（GBS §11） |
-| `item-sell` | `{ itemId, quantity }` | 出售可堆疊物品 |
-| `artifact-sell` | `{ instanceIds: string[] }` | 出售寶物實例 |
-| `market-get` | `{ days?: number }` | 今日價格與最近 7 天走勢 |
+| 端點 | 方法 | 請求 | 說明 |
+|---|---|---|---|
+| `character-create` | `POST` | 空 body 或 `{}` | 建立初始狀態（木製十字鎬 Lv1，D10）與 `rng_secret`；`201`，已存在則 `409 CHARACTER_EXISTS`。角色名稱 / 外觀不在本階段範圍 |
+| `game-state` | `GET` | 不接受任何 query | **唯讀**，不結算、不寫入；未建立角色 `404 PLAYER_NOT_FOUND`。要結算請送 `settle` 指令 |
+| `game-action` | `POST` | header `Idempotency-Key`；body 必須恰好是 `{ "command": GameCommand }` | 所有改變狀態的操作：`settle`、`claim_report`、`select_mining_mode`、`unlock_zone`、`purchase_pickaxe`、`equip_pickaxe`、`upgrade_pickaxe`、`craft`、`sell_items`、`sell_artifacts`。指令格式由引擎 `parseCommand` 嚴格驗證（不接受價格、深度、時間等欄位） |
+| （所有端點） | `OPTIONS` | — | CORS preflight；其他方法 `405` |
+
+原 v1.6 以前「一個動作一個端點」的規劃（`state-get`、`mining-settle`、`report-claim`、`pickaxe-buy`…）改為單一 `game-action` + 指令型別：驗證、冪等、CAS 重試與回應保存只需實作一次，指令集與引擎 `GameCommand` 一一對應。`market-get` 屬市場排程，不在本階段範圍。
 
 ### 10.3 錯誤碼
 
@@ -602,6 +592,37 @@ sequenceDiagram
 | 操作失敗 | 操作沒有任何效果；若結算有變化（例如剛產生報告）`commit.actionApplied = false`，結算結果仍提交 |
 | 回應保存（實作） | `commit ≠ null`：狀態與回應同一交易提交（`committed = true`）。`commit = null`（無變化、或遊戲規則拒絕且結算沒有變化）：只保存回應（`committed = false`），保存前同樣做 CAS，確保回應根據最新狀態計算。**不保存**：`IDEMPOTENCY_MISMATCH`、`VERSION_CONFLICT`（重試用盡）、資料庫錯誤、伺服器狀態異常，Client 可以用同一個 key 重試 |
 | 寶物實例 | 主鍵 `(player_id, instance_id)`；`instance_id = "d" + digCounter`，同一方塊不會產生兩個實例 |
+
+
+### 10.7 身分驗證與 Service Role 【Supabase Integration 2/2】
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant EF as Edge Function
+    participant A as Supabase Auth
+    participant DB as Postgres (RPC)
+    C->>G: POST /functions/v1/game-action (Bearer JWT, Idempotency-Key, {command})
+    G->>EF: 轉送
+    EF->>A: auth.getUser(jwt)（anon key client）
+    A-->>EF: user.id 或 401
+    EF->>EF: 驗證 header / body（parseCommand）
+    EF->>DB: rpc game_load_snapshot(user.id, key, hash)（service role client）
+    DB-->>EF: 快照 + rng_secret，或已保存的回應
+    EF->>EF: executeRequest（@mining/game-engine，與 Node 相同原始碼）
+    EF->>DB: rpc game_commit(...)（CAS，衝突時最多重試 3 次）
+    EF-->>C: ApiResponse（不含 rng_secret）
+```
+
+- **Service Role Key** 只在 Edge Function 內以 `SUPABASE_SERVICE_ROLE_KEY`（Supabase 自動注入）建立 client，只用來呼叫三個 `game_*` RPC；不出現在任何回應、`NEXT_PUBLIC_*` 或瀏覽器。一定先完成 `getUser` 才建立。
+- **`verify_jwt = false`**（`supabase/config.toml`）：gateway 的 JWT 檢查會擋掉不帶 `Authorization` 的瀏覽器 preflight，因此由函式內 `getUser` 驗證每個請求（`OPTIONS` 除外，它不讀寫任何資料）。`getUser` 會向 Auth 伺服器確認 token，已登出 / 被刪除的使用者也會被拒絕。
+- `GAME_API_ALLOWED_ORIGIN`（選填）：CORS 允許的來源；未設定時為 `*`（API 本身靠 Bearer token，不依賴 cookie）。
+- `EDGE_DIAGNOSTICS=true`（只在本機 `[edge_runtime.secrets]`）：回應加上 `Server-Timing` 與 `X-Diagnostics-Memory`，供 §10.8 測量；正式環境不設定。
+
+### 10.8 Edge Runtime 實測效能
+
+在 CI 的真實 Supabase Local（Edge Runtime、Deno）上，經由 gateway 以 HTTP 呼叫 `game-action`，最壞情境：回訪 zone1、鑽石十字鎬 Lv5、三套套組（9 件寶物）、前線 3000、離線 18 小時 → 模擬上限 12 小時、3,384 個方塊。數值與測量方式見 PR 說明；CPU 以「函式內總時間 − Auth − DB」的純計算時間近似（計算是同步 CPU 工作，不含 I/O 等待），這是 wall time 的上限估計，不是 runtime 回報的 CPU 計數。
 
 ## 11. 安全
 
