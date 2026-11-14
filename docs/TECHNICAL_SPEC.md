@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.8 | Playable MVP（Auth + Mining UI）：§12 改為已實作的前端（Zustand store、`predictBlockProgress`、同步排程 20 秒心跳 / 方塊完成時同步（間隔 ≥ 10 秒）、路由 `/`、`/login`），新增 §12.6 API Client 與錯誤處理、§12.7 多分頁。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.7 | Supabase Integration（2/2）：§10.1 / §10.2 改為已實作的 3 個 Edge Function（取代原本一動作一端點的規劃）；新增 §10.7 身分驗證與 verify_jwt 決策、§10.8 Edge Runtime 實測效能。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.6 | Supabase Integration（1/2）：§8.2–§8.5 依實作的 schema 更新（與 v1.5 草稿的差異見 §8.6）；§10.4 RPC 名稱與流程；§10.6 回應保存規則；§14.5 真實 Supabase Local 整合測試。**遊戲規則、數值與 RNG_VERSION 不變** |
 
@@ -641,46 +642,55 @@ sequenceDiagram
 
 ## 12. Client 架構
 
-### 12.1 狀態（Zustand）
+### 12.1 狀態（Zustand）【Playable MVP 已實作】
+
+`apps/web/src/lib/game/store.ts`（vanilla store，Controller 與 React 共用）：
 
 ```ts
-interface GameStore {
-  server: PlayerStateView | null;  // 最後一次伺服器回傳的權威狀態
-  receivedAt: number;              // 收到時的本機時間（僅用於預測）
-  eventQueue: GameEvent[];         // 待播放的掉落動畫
-  pendingReport: OfflineReportView | null;
-  ui: { tab: "mine" | "inventory" | "workshop" | "collection"; ... };
+interface GameUiState {
+  phase: "booting" | "signed_out" | "no_character" | "ready" | "error";
+  view: PlayerStateView | null;   // 最後一次伺服器回傳的權威狀態（整個覆蓋）
+  fresh: boolean;                 // view 是否剛由結算產生（只有這時才能預測進度）
+  receivedAt: number;             // 收到時的本機時間（performance.now，僅用於預測）
+  busy: BusyOp | null;            // 進行中的狀態操作（同時只有一個）
+  lastSettlement, recentLoot;     // 最新挖掘成果、Recent Loot（以 digCounter 去重）
+  sync: { ok, lastOkAt, failures, message }; notice; error;
 }
 ```
 
-- 不在 Client 保存任何會入帳的計算結果。
-- 伺服器回應永遠覆蓋本機狀態。
+- 不在 Client 保存任何會入帳的計算結果；金幣、背包、裝備、挖掘進度一律來自伺服器回應。
+- 待領取報告就是 `view.state.pendingOfflineReport`（不另外保存）。
+- 原規劃的 `eventQueue`（動畫佇列）與 `ui.tab` 留到背包 / 工坊 / 圖鑑 UI 的 PR。
 
 ### 12.2 進度預測
 
-- 引擎提供 `predictBlockProgress(state, elapsedMs)`，只用 Hardness、裝備與工作量，不用亂數。
-- 進度條依預測顯示；方塊的 OreType 在伺服器結算前顯示為未知。
-- 預測與伺服器結果不一致時，以伺服器為準，進度條直接校正。
+- 引擎 `predictBlockProgress(state, elapsedMs)`（`packages/game-engine/src/predict.ts`）：只用 Hardness、目前數值與已累積的工作量，不用亂數；回傳狀態、目前方塊進度、預測完成的方塊數（內容未知）、下一個方塊的剩餘時間。
+- 預測最多到 300 秒（在線門檻）；不模擬數值變化（例如掉落湊齊套組）。
+- 單元測試確認：數值不變時，預測的方塊數與方塊進度與伺服器在線結算完全一致。
+- 進度條依預測顯示；方塊的礦石在伺服器結算前顯示為「?」；預測完成的方塊顯示為「待結算」，不顯示任何資源。
+- 伺服器回應一到就以新狀態為基準（校正）。`game-state`（唯讀）與錯誤附帶的狀態不是現在的狀態（`fresh = false`），不預測，並盡快結算。
 
-### 12.3 結算排程 【提案 T9】
+### 12.3 結算排程【實作值；T9 調整】
 
 | 觸發 | 規則 |
 |---|---|
-| 預測方塊完成 | 預測完成時間 + 300ms 後呼叫 `mining-settle` |
-| 心跳 | 最長 60 秒一定呼叫一次（維持「在線」狀態，GBS §15 的 300 秒門檻） |
-| 最短間隔 | 5 秒（前期方塊約 6.5 秒，不會頻繁觸發） |
-| 分頁回到前景 | `visibilitychange` 時立即呼叫 |
-| 背景分頁 | 瀏覽器會延遲計時器；若間隔超過 300 秒，伺服器會產生離線報告，這是預期行為 |
+| 進入遊戲 | `game-state` → 沒有待領報告時立即 `settle` |
+| 心跳 | 最長 **20 秒**一定同步一次（`HEARTBEAT_MS`；任務要求 15–30 秒；300 秒在線門檻內） |
+| 預測方塊完成 | 完成時間 + 300 ms，但距離上次同步至少 **10 秒**（`BLOCK_SYNC_MIN_MS`；原提案 5 秒） |
+| 分頁回到前景 / 視窗 focus / `online` 事件 | 立即同步 |
+| 背景分頁 | 停止計時器；超過 300 秒才回來時由伺服器產生離線報告（預期行為，Client 不補算） |
+| 失敗 | 退避 5 → 10 → 20 → 30 秒；第一次載入失敗時自動重新載入 |
+| 待領取報告 | 不排程（D24：暫停） |
 
-### 12.4 路由 【提案 T10】
+- `setTimeout` 鏈，一次只有一個計時器；React Strict Mode 重複掛載時 `bootstrap` 只執行一次。
+- 同時觸發的同步合併成一個請求；同時只允許一個會改變狀態的操作。
 
-GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
+### 12.4 路由【T10 定案】
 
-- `/`：遊戲主畫面，以 Tab 切換 Mine / Inventory / Workshop / Collection（狀態在 store，切換不中斷挖掘預測）。
-- `/create`：角色建立。
-- `/login`：登入。
-
-此項與待確認 UI-1 相關。
+- `/`：遊戲主畫面（Mine；底部導覽的 Inventory / Workshop / Collection 為下一個 PR）。未登入一律導向 `/login`。
+- `/login`：Email / Password 登入與註冊。登入過期時顯示 `?expired=1` 提示。
+- 角色建立不是獨立路由：登入後 `game-state` 回 404 時在 `/` 顯示建立畫面。
+- `/dev`（診斷）與 `/dev/preview`（記憶體後端預覽各種畫面狀態）只在 `next dev` 存在；`/dev/preview` 以 `page.dev.tsx` 命名，正式 build 不產生路由與 bundle。
 
 ### 12.5 動畫佇列
 
@@ -688,6 +698,23 @@ GDD §8.2 寫單頁 Dashboard，§9.3 寫多頁路由。建議：
 - Common 合併顯示在 Recent Loot；Rare 短暫閃光；Epic 通知；Legendary 全螢幕。【GDD §4.2】
 - Legendary 播放期間，後續事件繼續排隊。
 - 動畫只負責呈現，獎勵在伺服器回應時就已入帳。【GDD §7.4】
+- **MVP 現況**：Recent Loot 以顏色 / 符號區分稀有度，報告中的寶物有簡單的出現動畫；完整的動畫佇列與全螢幕揭曉留到後續 UI PR。
+
+### 12.6 API Client 與錯誤處理【Playable MVP】
+
+`apps/web/src/lib/game/api.ts`（純 TypeScript，瀏覽器與 Node 整合測試共用）：
+
+- `getState()`、`createCharacter()`、`action(command, requestId)`。只送 `Authorization: Bearer <access token>` 與 `apikey`，不送任何 playerId。
+- Idempotency-Key：每個獨立操作 `crypto.randomUUID()`；同一個操作的所有重試沿用同一個 key（包含玩家按「重試」領取同一份報告）。
+- 401：`refreshSession()` 一次後以同一個 key 重送；仍失敗 → 本機登出並導向 `/login?expired=1`。
+- 網路錯誤、逾時（15 秒）、502 / 503 / 504、`SERVER_BUSY`、`VERSION_CONFLICT`：以同一個 key 退避重試（0.5 / 1.5 / 3.5 秒）。逾時的請求可能已提交，重送會拿到伺服器保存的同一個回應。
+- 錯誤對應：`REPORT_PENDING` → 重新讀取並顯示報告；`REPORT_ALREADY_CLAIMED` / `REPORT_NOT_FOUND` → 提示並重新讀取；`CHARACTER_NOT_FOUND` → 建立角色畫面；`INTERNAL_ERROR` → 錯誤訊息（不重試）。
+- 沒有使用 TanStack Query：狀態只有一份伺服器快照，由 Controller 統一寫入 Zustand，避免兩套快取。
+
+### 12.7 多分頁
+
+- 成功提交後以 `BroadcastChannel("mining-expedition:state")` 廣播 `stateVersion`；其他分頁看到較新的版本時以 `game-state` 重新讀取，2 秒後結算。
+- 多分頁同時結算時由伺服器 CAS（§10.6）處理；同一份報告只會入帳一次，晚到的分頁得到 `REPORT_ALREADY_CLAIMED` 後重新讀取。
 
 ---
 

@@ -13,12 +13,17 @@
 
 ```text
 mining-expedition/
-├── apps/web/                      # Next.js 16（App Router）— 部署到 Vercel
+├── apps/web/                      # Next.js 16（App Router、Tailwind CSS 4、Zustand）— 部署到 Vercel
+│   └── src/
+│       ├── app/                   # 路由：/（遊戲）、/login、/dev（只在 next dev）
+│       ├── components/            # auth/（登入）、game/（主畫面、離線報告、建立角色）、ui/（像素元件）
+│       └── lib/                   # auth/（Supabase Browser Client、Session）、game/（API Client、Store、同步控制器）
 ├── packages/
 │   ├── game-engine/               # 純 TypeScript 遊戲引擎（Web 與 Edge Functions 共用）
 │   ├── game-data/                 # 靜態遊戲資料、DATA_VERSION
 │   └── game-server/               # 伺服器協調層：載入快照 → executeRequest → 原子提交（Node / Deno 共用）
-├── tests/integration/             # 真正的 Supabase Local 整合測試（RLS、RPC、冪等、並行）
+├── tests/integration/             # 真正的 Supabase Local 整合測試（RLS、RPC、冪等、並行、Edge Functions、Web Client）
+├── tests/e2e/                     # Playwright：瀏覽器 → Next.js → Supabase Local 的端到端測試與畫面截圖
 ├── supabase/
 │   ├── config.toml                # 本地 Supabase 設定
 │   ├── migrations/                # 資料庫 migration：玩家 schema、RLS、RPC（部署到 Supabase Cloud）
@@ -160,7 +165,8 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | 端點 | 本地（`next dev`） | 正式（Vercel production / preview） |
 |---|---|---|
 | `GET /api/health` | `{"ok": true}` / 503 `{"ok": false}` | 相同；失敗原因只寫入伺服器日誌 |
-| `GET /api/dev/diagnostics`、`/` 的診斷表 | 引擎版本、延遲、錯誤細節 | 404 / 只顯示「開發中」 |
+| `GET /api/dev/diagnostics`、`/dev` 的診斷表 | 引擎版本、延遲、錯誤細節 | 404 |
+| `/dev/preview?scene=new\|mining\|blocked_power\|blocked_unlock\|report` | 以記憶體後端（與伺服器相同的 game-server 程式碼）預覽各種畫面，不需要登入 | 不存在（`page.dev.tsx` 不會被 build） |
 | `GET /functions/v1/health` | 加上引擎資訊與資料庫細節（`EDGE_DIAGNOSTICS=true`） | 只回傳 `{"ok": boolean}` |
 
 - 所有健康檢查都只使用 anon key 呼叫 `health_ping`（回傳固定的 `{"pong": true}`），不使用 service role，也不回傳 PostgreSQL 版本。
@@ -212,6 +218,35 @@ dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲
 - 離線時間以「把測試玩家的時間基準往前移」模擬；正式程式碼沒有任何可以改時間的參數。
 - `pnpm test` 中的 `packages/game-server` 測試用 PGlite（WASM PostgreSQL）套用同一份 migration，可在沒有 Docker 的環境快速執行；但它是單一連線、PG18，**正式驗證以 Supabase Local 為準**（CI 兩者都跑）。
 
+### 玩遊戲（瀏覽器）
+
+依「第一次啟動」啟動 Supabase Local 與 web 後，打開 <http://127.0.0.1:3000>：
+
+1. 未登入會導向 `/login`；用任意 Email / 密碼（至少 6 字元）註冊。本地不寄驗證信，註冊後直接登入。
+2. 第一次登入顯示「建立礦工」，按「開始探險」。
+3. 挖礦主畫面每 20 秒（或預估方塊完成時）向伺服器同步一次；進度條是本地預估，資源只在同步後出現。
+4. 離開超過 5 分鐘再回來，會先顯示「探險報告」，領取後才繼續挖掘。
+
+想看離線報告不用真的等：在 Studio（<http://127.0.0.1:54323>）或 `psql` 執行
+`update public.players set created_at_ms = created_at_ms - 3*3600000, last_settled_at_ms = last_settled_at_ms - 3*3600000 where id = '<user id>';`
+再重新整理（只限本地測試資料）。
+
+### 前端測試
+
+```bash
+dev pnpm --filter @mining/web test   # API Client、同步控制器、元件（Vitest + jsdom，記憶體後端，不需要 Supabase）
+dev pnpm test:integration            # 含 tests/integration/web-client.test.ts：Web Client × 真實 Auth / Edge Functions
+```
+
+瀏覽器 E2E（Playwright 官方 image，不需在宿主安裝瀏覽器；需要 web 與 Supabase Local 已啟動）：
+
+```bash
+docker run --rm --network host --ipc=host -v "$PWD:$PWD" -w "$PWD/tests/e2e" \
+  mcr.microsoft.com/playwright:v1.65.1-noble npx playwright test
+```
+
+截圖輸出到 `tests/e2e/screenshots/`（桌面與手機）。`--network host` 需要 Linux 或 Docker Desktop 4.34+ 的 host networking。
+
 ### 遊戲 API（Edge Functions）
 
 `dev pnpm supabase:start` 會一併啟動 Edge Runtime，以下三個函式即可透過 `http://127.0.0.1:54321/functions/v1/<name>` 呼叫（詳細規格見 `docs/TECHNICAL_SPEC.md` §10）：
@@ -232,9 +267,9 @@ dev pnpm test:integration    # RLS / RPC / Auth / 冪等 / CAS / 並行 / 遊戲
 
 | Job | 內容 |
 |---|---|
-| install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎涵蓋率門檻（lines ≥ 90%）→ 引擎快照（Node）→ 模擬器 smoke run → `pnpm build`（Node 22，不使用 Docker） |
+| install / typecheck / test / build | `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → 引擎涵蓋率門檻（lines ≥ 90%）→ 引擎快照（Node）→ 模擬器 smoke run → `pnpm build` → 檢查瀏覽器 bundle 不含伺服器端識別字（Node 22，不使用 Docker） |
 | deno check (Edge Functions) / engine determinism | 以 Deno 型別檢查 Edge Function（含匯入 `packages/`）與引擎；Deno 執行引擎快照並與 Node 使用的 fixture 比對 |
-| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`；`supabase db reset`（migration 可從乾淨資料庫重建）；`pnpm test:integration`（真實 Supabase 整合測試，含 Edge Functions HTTP 測試與效能實測）；`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
+| docker integration (Linux) | 在開發容器內執行 `pnpm typecheck && pnpm test`；再依上方「第一次啟動」步驟啟動 Supabase Local，執行 `verify:env`、`verify:hot-reload`；`supabase db reset`（migration 可從乾淨資料庫重建）；`pnpm test:integration`（真實 Supabase 整合測試，含 Edge Functions HTTP 測試、效能實測、Web Client）；Playwright E2E（官方 Docker image，截圖上傳為 artifact `e2e-screenshots`）；`diagnose`。**只代表 Linux + Docker Engine，不代表 Docker Desktop** |
 
 ---
 

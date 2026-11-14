@@ -21,7 +21,8 @@
     "verify:env": "node scripts/verify-env.ts",
     "verify:hot-reload": "node scripts/verify-hot-reload.ts",
     "diagnose": "node scripts/diagnose.ts",
-    "sim": "node scripts/balance-sim.ts"
+    "sim": "node scripts/balance-sim.ts",
+    "test:e2e": "pnpm --filter @mining/e2e test:e2e"
   },
   "devDependencies": {
     "@mining/game-data": "workspace:*",
