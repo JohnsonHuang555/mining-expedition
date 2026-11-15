@@ -366,12 +366,12 @@ function LatestResult() {
   );
 }
 
-const NAV = [
+const NAV: readonly { href: string | null; label: string; sub: string }[] = [
   { href: "/", label: "Mine", sub: "挖礦" },
   { href: "/inventory", label: "Inventory", sub: "背包" },
   { href: "/workshop", label: "Workshop", sub: "工坊" },
-  { href: null, label: "Collection", sub: "圖鑑" },
-] as const;
+  { href: "/collection", label: "Collection", sub: "圖鑑" },
+];
 
 function BottomNav() {
   const pathname = usePathname() ?? "/";

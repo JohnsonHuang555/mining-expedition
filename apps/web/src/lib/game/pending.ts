@@ -83,14 +83,21 @@ export function browserPendingStore(userId: string, storageOverride?: Storage | 
       if (!s) return [...memory.values()].sort(byAge);
       try {
         migrateLegacy(s);
-        const out: PendingAction[] = [];
+        // 先取得所有符合 prefix 的 key 快照，再逐筆驗證：刪除無效紀錄會改變 storage 的索引，
+        // 若邊走訪邊刪除，排在後面的有效紀錄可能被跳過（這次 bootstrap 就漏掉調和）
+        const keys: string[] = [];
         for (let i = 0; i < s.length; i++) {
           const k = s.key(i);
-          if (!k?.startsWith(prefix)) continue;
+          if (k?.startsWith(prefix)) keys.push(k);
+        }
+        const out: PendingAction[] = [];
+        const invalid: string[] = [];
+        for (const k of keys) {
           const p = parsePending(s.getItem(k));
           if (p && k === prefix + p.requestId) out.push(p);
-          else s.removeItem(k); // 格式錯誤的紀錄
+          else invalid.push(k);
         }
+        for (const k of invalid) s.removeItem(k); // 格式錯誤的紀錄
         // storage 寫入失敗時只存在記憶體的紀錄也要算進來
         for (const p of memory.values()) if (!out.some((x) => x.requestId === p.requestId)) out.push(p);
         return out.sort(byAge);

@@ -10,6 +10,8 @@ import { createGameApi, newRequestId } from "../../apps/web/src/lib/game/api.ts"
 import { GameController, type SyncChannel } from "../../apps/web/src/lib/game/controller.ts";
 import { type ActionLock, memoryActionLock, memoryPendingStore, type PendingStore } from "../../apps/web/src/lib/game/pending.ts";
 import { createGameStore } from "../../apps/web/src/lib/game/store.ts";
+import { collectionEntries, collectionProgress, setRows } from "../../apps/web/src/lib/game/collection.ts";
+import { computeStats, heldCounts } from "@mining/game-engine";
 import { PASSWORD, env, pool } from "./src/backend.ts";
 
 const HOUR = 3_600_000;
@@ -301,5 +303,68 @@ describe("Web Client × 真實 Supabase Local", () => {
     await a2.controller.bootstrap();
     expect(a2.store.getState().pendingCount).toBe(0);
     expect(a2.store.getState().view!.state.pickaxes).toMatchObject({ pick_stone: 1 });
+  });
+
+  it("圖鑑與套組（真實資料庫）：挖到寶物 → 圖鑑 → 集齊套組 → 伺服器能力值含加成 → 出售一件 → 加成失效、圖鑑保留；重新登入一致", async () => {
+    const u = await signUp();
+    const t = tab(u.supabase);
+    await t.controller.createCharacter();
+    // 1. 挖礦取得寶物：離線 5 小時，有效挖掘超過 4 小時 → 首次寶物保護保證至少一件（D18）
+    await rewind(u.userId, 5 * HOUR);
+    await t.controller.retryBootstrap();
+    const report = t.store.getState().view!.state.pendingOfflineReport!;
+    expect(report.rewards.artifacts.length).toBeGreaterThan(0);
+    // 領取前：寶物還不是正式持有，圖鑑也還沒更新
+    expect(t.store.getState().view!.state.heldArtifacts).toHaveLength(0);
+    expect(collectionProgress(collectionEntries(t.store.getState().view!.state)).overall.found).toBe(0);
+    expect(await t.controller.claimReport()).toBe(true);
+    const s1 = t.store.getState().view!.state;
+    expect(s1.heldArtifacts.length).toBe(report.rewards.artifacts.length);
+    const db1 = await pool.query(`select artifact_id, total_found from public.artifact_discoveries where player_id = $1 order by artifact_id`, [u.userId]);
+    const fromView = collectionEntries(s1)
+      .filter((e) => e.discovery)
+      .map((e) => ({ artifact_id: e.id, total_found: String(e.discovery!.totalFound) }))
+      .sort((a, b) => a.artifact_id.localeCompare(b.artifact_id));
+    expect(db1.rows.map((r) => ({ artifact_id: r.artifact_id, total_found: String(r.total_found) }))).toEqual(fromView);
+
+    // 2. 取得老礦工套組的其餘成員（測試準備：寫入資料庫，與正常掉落相同的資料列）
+    const held = new Set(s1.heldArtifacts.map((a) => a.artifactId));
+    const missing = ["a_z1_lantern", "a_z1_badge", "a_z1_map"].filter((a) => !held.has(a as never));
+    const base = Number((await pool.query(`update public.players set dig_counter = dig_counter + 10 where id = $1 returning dig_counter - 10 as dc`, [u.userId])).rows[0].dc);
+    for (const [k, a] of missing.entries()) {
+      await pool.query(
+        `insert into public.artifact_instances (player_id, instance_id, artifact_id, obtained_at_ms, mode, band, frontier_block_index, dig_counter, source) values ($1, $2, $3, 0, 'frontier', 0, 0, $4, 'drop')`,
+        [u.userId, `d${base + k}`, a, base + k],
+      );
+      await pool.query(`insert into public.artifact_discoveries values ($1, $2, 0, 0, 1) on conflict (player_id, artifact_id) do update set total_found = artifact_discoveries.total_found + 1`, [u.userId, a]);
+    }
+    await t.controller.retryBootstrap();
+    const v2 = t.store.getState().view!;
+    expect(setRows(v2.state).find((x) => x.id === "old_miner")).toMatchObject({ heldMembers: 3, ownedNow: true, active: true, everCompleted: true });
+    // 3. 伺服器回傳的能力值包含套組加成（UI 不自行套用）；與引擎規則一致
+    expect(v2.stats.speed1000).toBe(1_030);
+    expect(v2.stats).toEqual(computeStats(v2.state.equippedPickaxe, v2.state.pickaxes[v2.state.equippedPickaxe]!, heldCounts(v2.state)));
+
+    // 4. 出售其中一件（伺服器既有的 sell_artifacts；測試準備當日市場倍率，UI 本階段不開放寶物出售）
+    await pool.query(
+      `insert into public.market_prices (price_date, artifact_id, multiplier_ppm) values ((now() at time zone 'Asia/Taipei')::date, 'a_z1_badge', 1000000) on conflict do nothing`,
+    );
+    const badge = v2.state.heldArtifacts.find((a) => a.artifactId === "a_z1_badge")!;
+    expect(await t.controller.perform({ type: "sell_artifacts", instanceIds: [badge.instanceId] })).toBe("ok");
+    const v3 = t.store.getState().view!;
+    const row = setRows(v3.state).find((x) => x.id === "old_miner")!;
+    expect(row).toMatchObject({ active: false, ownedNow: false, everCompleted: true });
+    expect(v3.stats.speed1000).toBe(1_000);
+    expect(collectionEntries(v3.state).find((e) => e.id === "a_z1_badge")).toMatchObject({ held: 0, discovery: expect.objectContaining({ totalFound: expect.any(Number) }) });
+
+    // 5. 重新登入：圖鑑與套組狀態一致
+    const again = browser();
+    await again.auth.signInWithPassword({ email: u.email, password: PASSWORD });
+    const t2 = tab(again);
+    await t2.controller.bootstrap();
+    const v4 = t2.store.getState().view!;
+    expect(collectionProgress(collectionEntries(v4.state)).overall.found).toBe(collectionProgress(collectionEntries(v3.state)).overall.found);
+    expect(setRows(v4.state)).toEqual(setRows(v3.state));
+    expect(v4.stats.speed1000).toBe(1_000);
   });
 });
