@@ -78,7 +78,7 @@ test("市場：報價 → 出售重複寶物 → 套組失效警告 → 成交 �
   const c0 = await coinsOf(id);
   await dialog(page).getByRole("button", { name: "確定出售" }).click();
   await expect(page.getByTestId("market-result")).toContainText(`伺服器實際成交 ${fmt(price("a_z1_lantern", await ppm(date, "a_z1_lantern")))} 金幣`);
-  expect(await held(id, "a_z1_lantern")).toBe(1);
+  await expect.poll(() => held(id, "a_z1_lantern")).toBe(1);
   expect(await coinsOf(id)).toBeGreaterThanOrEqual(c0 + price("a_z1_lantern", await ppm(date, "a_z1_lantern")));
 
   // 最後一件提燈：套組失效警告
@@ -88,6 +88,7 @@ test("市場：報價 → 出售重複寶物 → 套組失效警告 → 成交 �
   await expect(page.getByTestId("sale-set-warning")).toContainText("出售後將失去老礦工套組效果：Speed ×1.03");
   await shot(page, "18-set-warning");
   await dialog(page).getByRole("button", { name: "仍要出售" }).click();
+  await expect(dialog(page)).toBeHidden();
   await expect(page.getByTestId("market-result")).toBeVisible();
   await expect(page.getByTestId("market-held-a_z1_lantern")).toHaveText("持有 ×0");
   await expect(page.getByTestId("market-set-a_z1_badge")).toHaveCount(0);
@@ -113,8 +114,9 @@ test("市場：報價 → 出售重複寶物 → 套組失效警告 → 成交 �
   await shot(page, "19-quote-expired");
   await page.unroute("**/functions/v1/game-action", expire);
   await dialog(page).getByRole("button", { name: "以新報價出售" }).click();
-  await expect(page.getByTestId("market-result")).toBeVisible();
-  expect(await held(id, "a_z1_heart")).toBe(0);
+  await expect(dialog(page)).toBeHidden();
+  await expect(page.getByTestId("market-result")).toContainText(`伺服器實際成交 ${fmt(price("a_z1_heart", await ppm(date, "a_z1_heart")))} 金幣`);
+  await expect.poll(() => held(id, "a_z1_heart")).toBe(0);
   const sells = await pool.query(`select count(*)::int as n, count(distinct idempotency_key)::int as k from public.action_log where player_id = $1 and command = 'sell_artifacts'`, [id]);
   expect(sells.rows[0]).toEqual({ n: 4, k: 4 }); // 提燈、提燈、過期（拒絕）、礦脈之心（新的 Request ID）
 
