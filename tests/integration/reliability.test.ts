@@ -30,15 +30,23 @@ async function api(fn: string, token: string | null, opts: { method?: string; ke
   if (token) headers.Authorization = `Bearer ${token}`;
   if (opts.key) headers["Idempotency-Key"] = opts.key;
   if (opts.expire) headers["Idempotency-Expire"] = "true";
-  const res = await fetch(`${env.functionsUrl}/${fn}`, { method: opts.method ?? "POST", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
-  const text = await res.text();
-  let body: Body = null;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    body = { raw: text };
+  // Supabase Local 的 Edge Runtime 在負載下偶爾回傳沒有內容的 5xx（worker connection closed，不是遊戲 API 的回應）。
+  // 這裡的請求都是冪等的（同一個 Idempotency-Key / 唯讀 / 建立角色），只對這種 gateway 回應重試；遊戲 API 的 JSON 錯誤（含 SERVER_BUSY）不重試
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`${env.functionsUrl}/${fn}`, { method: opts.method ?? "POST", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
+    const text = await res.text();
+    let body: Body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = { raw: text };
+    }
+    if (res.status >= 502 && res.status <= 504 && "raw" in (body ?? {}) && attempt < 4) {
+      await new Promise((r) => setTimeout(r, 300 * attempt));
+      continue;
+    }
+    return { status: res.status, headers: res.headers, body };
   }
-  return { status: res.status, headers: res.headers, body };
 }
 /** Supabase Local 的 Edge Runtime 在負載下偶爾回傳沒有內容的 503（不是遊戲 API 的回應）；只對唯讀請求重試這種情況 */
 const gatewayFlake = (c: Call) => c.status >= 502 && c.status <= 504 && !(c.body && typeof c.body === "object" && "error" in c.body);
