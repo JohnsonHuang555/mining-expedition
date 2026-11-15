@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.16 | Reliability & Security Hardening：§10.3 錯誤碼與重試語意（`RATE_LIMITED` 改為伺服器端每位使用者限流、新增 `REQUEST_EXPIRED`）；新增 §10.9 Rate Limit、§10.10 action_log 分層保存與 Request ID 有效期限、§10.11 錯誤分類與 log；§12.14 市場歷史排隊讀取、選擇上限、成交提示。詳細的威脅模型與部署注意事項見 `docs/SECURITY_RELIABILITY.md`。**遊戲規則不變** |
 | v1.15 | Market UI & Artifact Trading：新增 §12.14 市場畫面（`/market`）、出售流程、套組失效預測、跨日報價重新確認、價格無法取得時的處理；§12.10 寶物出售 UI 開放。**定價演算法、倍率、基礎價值、套組加成、結算不變** |
 | v1.14 | Market Backend & Daily Pricing：§6.3 市場亂數改為資料庫內密鑰（`private.market_secret`）與確定的整數演算法；§8.2 / §8.3 市場資料表、只新增、權限；§9 改為已實作（延遲生成 + pg_cron、並行、失敗處理、報價與成交價）；§10 回應加 `market`、`sell_artifacts` 必須帶 `marketDate`、新錯誤碼 `MARKET_QUOTE_EXPIRED` / `MARKET_UNAVAILABLE`；§12.10 寶物出售後端開放（UI 在 PR #14）。**倍率範圍、Step、均值回歸、基礎價值、掉落、RNG_VERSION 不變** |
 | v1.13 | Artifact Reveal：§12.5 改為已實作的揭曉系統（佇列、去重、在線 / 離線資料流）；§12.13 套組旗標改為 `allDiscovered`（圖鑑已發現全部成員）、確認未發現寶物的揭露規則。**遊戲規則、掉落、首次保護、結算與 RNG_VERSION 不變** |
@@ -536,7 +537,10 @@ market_prices（全域，依日期）
 | `INVALID_REQUEST` | 參數錯誤 |
 | `IDEMPOTENCY_MISMATCH` | 同一個 key 對應不同內容 |
 | `VERSION_CONFLICT` | 重試三次後仍衝突 |
-| `RATE_LIMITED` | 結算請求間隔少於 2 秒 |
+| `RATE_LIMITED` | 每位使用者的請求超過上限（429 + `Retry-After`；未執行、未保存，以同一個 key 重試）【v1.16，取代原「結算間隔 2 秒」的規劃】 |
+| `REQUEST_EXPIRED` | 410：這個 key 已處理過但詳細回應已超過保存期限（`expired.processed = true`、`ok` = 當初是否成功），或未確認操作超過有效期限而被確認作廢（`processed = false`）；**絕不重新執行**【v1.16】 |
+| `SERVER_BUSY` | 503：資料庫錯誤、逾時、Edge 暫時錯誤；結果可能不確定 → 以同一個 key 重試 / 調和 |
+| `INTERNAL_ERROR` | 500：伺服器狀態異常；不保存，結果視為不確定 |
 
 ### 10.4 提交流程
 
@@ -642,6 +646,46 @@ sequenceDiagram
 - **`verify_jwt = false`**（`supabase/config.toml`）：gateway 的 JWT 檢查會擋掉不帶 `Authorization` 的瀏覽器 preflight，因此由函式內 `getUser` 驗證每個請求（`OPTIONS` 除外，它不讀寫任何資料）。`getUser` 會向 Auth 伺服器確認 token，已登出 / 被刪除的使用者也會被拒絕。
 - `GAME_API_ALLOWED_ORIGIN`（選填）：CORS 允許的來源；未設定時為 `*`（API 本身靠 Bearer token，不依賴 cookie）。
 - `EDGE_DIAGNOSTICS=true`（只在本機 `[edge_runtime.secrets]`）：回應加上 `Server-Timing` 與 `X-Diagnostics-Memory`，供 §10.8 測量；正式環境不設定。
+
+### 10.9 Rate Limit【v1.16】
+
+- **位置**：伺服器端、資料庫計數（`private.rate_limits`，每位使用者每個 bucket 一列，固定視窗）。`game-state` / `game-action` 在既有的 `game_load_snapshot` 內計數（不增加資料庫往返）；`character-create` 呼叫 `game_rate_limit`（低頻 API）。
+- **身分**：只用已驗證 JWT 的 user id；**不使用任何 IP header**（不信任可偽造的 header）。
+- **預設**（`DEFAULT_RATE_LIMITS`，環境變數 `GAME_RATE_LIMIT_ACTION` / `_STATE` / `_CREATE` 可覆寫，格式 `次數/毫秒`）：`game-action` 30 / 10 秒、`game-state` 20 / 10 秒、`character-create` 5 / 60 秒。正常同步（每 5–20 秒、多分頁各自同步）與玩家連續操作遠低於上限。
+- **不計數也不阻擋**：同一個 key 的重送（replay / 已壓縮 → expired）在計數前就回傳；作廢探詢（`Idempotency-Expire`）屬於調和；CAS 衝突的伺服器內重試只計一次。
+- **超限**：429 `RATE_LIMITED`、`Retry-After`（秒）與 `retryAfterMs`。伺服器沒有執行也沒有保存 → API Client 在 10 秒內的 Retry-After 以**同一個 key** 等待重試；更長的交給 Controller：保留未確認紀錄、Retry-After 之後自動以同一個 key 重試（領取報告、調和不會永久卡住）。
+- **限制**：無效 JWT 在呼叫資料庫前就被 `auth.getUser` 拒絕（401），不計入每位使用者的限制；大量建立帳號依賴 Supabase Auth 平台預設的 rate limit（本專案**尚未**在 `supabase/config.toml` 自訂 `[auth.rate_limit]`，Supabase Cloud 部署前需確認並設定）；每位使用者建立角色另有 `character-create` 的限制；IP 層級的 DDoS 防護依賴平台（Supabase gateway / Cloudflare），本專案沒有實作。
+
+### 10.10 action_log 分層保存與 Request ID 有效期限【v1.16】
+
+| 層 | 保存 | 用途 |
+|---|---|---|
+| 完整回應（`response`） | 30 天（pg_cron `action-log-compact`：每小時 `call private.action_log_drain()`，分批、每批 commit，直到清完或達上限） | 回應遺失後以同一個 key 重送：回傳完全相同的結果 |
+| 冪等識別（`player_id`、`idempotency_key`、`request_hash`、`command`、`committed`、`response_ok`） | **永久**（settle 以外） | 之後以同一個 key 重送：`REQUEST_EXPIRED`（附當初成功與否），**不重新執行**；不同內容 → `IDEMPOTENCY_MISMATCH` |
+| `settle` | 30 天後整筆刪除 | settle 沒有 Client 指定的效果（只把時間推進到「現在」）：同一個 key 再送只會結算到現在，不會重複發放 |
+
+- trigger `action_log_guard`：冪等識別不可改寫；回應只能被清除（壓縮），不能改成其他內容。
+- 清除吞吐量（PR #15 Review P1）：每批 2,000 列 × 2 種（刪 settle、壓縮交易）、每次最多 500 批 → 每小時最多 2,000,000 列；一位持續在線、每 20 秒同步的玩家每小時約 180 筆 settle。部分索引只涵蓋「還要處理的列」，掃描成本與積壓量成正比。監控：`select private.action_log_backlog()`（待處理數與最老時間，應維持在 0 附近）與 `cron.job_run_details`。
+- **未確認操作的有效期限（Client）**：超過 7 天（`PENDING_MAX_AGE_MS`）的未確認紀錄改送 `Idempotency-Expire: true`（只調和、不執行）。伺服器：key 已存在 → 回傳原本的結果（或 `REQUEST_EXPIRED` 附當初結果）；不存在 → **不執行**，寫下作廢紀錄（`processed = false`），之後同一個 key 的原始請求即使晚到也只會得到作廢結果（唯一鍵 + 同一交易的 CAS）。
+- Client 從不自行判定成功或失敗：`REQUEST_EXPIRED` 依伺服器的 `expired` 欄位顯示，並重新讀取狀態（狀態永遠以伺服器為準）。
+
+### 10.11 錯誤分類與 log【v1.16】
+
+| 類別 | 代碼 | HTTP | 交易是否已執行 | Client 行為 |
+|---|---|---|---|---|
+| 成功 / 重送 | — | 200 | 是（重送 = 原本的結果） | 套用回應 |
+| 規則拒絕 | `INSUFFICIENT_*`、`REPORT_PENDING`、`MARKET_QUOTE_EXPIRED`… | 409 / 422 | 否（保存在 action_log） | 清除未確認紀錄、顯示原因（報價過期 → 以新報價重新確認） |
+| 參數錯誤 | `INVALID_REQUEST`、`IDEMPOTENCY_MISMATCH` | 400 / 409 | 否 | 清除、顯示錯誤 |
+| 已過期的 key | `REQUEST_EXPIRED` | 410 | 依 `expired`（已處理 / 作廢） | 清除、重新讀取狀態 |
+| 未登入 | `UNAUTHORIZED` | 401 | 否 | 更新 token 一次；仍失敗 → 登出（未確認紀錄留在該使用者的 storage） |
+| 限流 | `RATE_LIMITED` | 429 | 否（未保存） | 保留未確認紀錄，`Retry-After` 後以同一個 key 重試 |
+| 市場無價格 | `MARKET_UNAVAILABLE` | 503 | 否（未保存） | 清除（確定未執行）、停用出售 |
+| 暫時錯誤 / 逾時 / 資料庫失敗 | `SERVER_BUSY`、`VERSION_CONFLICT` | 503 / 409 | **不確定** | 保留未確認紀錄，以同一個 key 重試 / 調和 |
+| 伺服器異常 | `INTERNAL_ERROR` | 500 | **不確定** | 同上；顯示錯誤 |
+| 網路 / 回應損壞 | `NETWORK`、`BAD_RESPONSE`（Client） | — | **不確定** | 同上 |
+
+- **逾時**：每個 RPC 預設 8 秒（`GAME_DB_TIMEOUT_MS`）。逾時的交易可能仍在資料庫中完成 → `SERVER_BUSY`（不確定），由同一個 key 調和。
+- **log**（Edge Function `console.error`，結構化 JSON）：錯誤與重送寫入 `request_rejected` / `request_failed`（fn、status、code、requestId、command、userId、attempts、durationMs）；資料庫錯誤 `db_error`、限流 `rate_limited`、作廢 `request_expired`。**不寫入** JWT、Authorization header、Service Role Key、RNG / 市場密鑰或玩家狀態內容；回應只含通用錯誤訊息。
 
 ### 10.8 Edge Runtime 實測效能
 
@@ -847,10 +891,12 @@ interface GameUiState {
 | 項目 | 規則 |
 |---|---|
 | 資料來源 | 報價只來自伺服器回應的 `market`（store 保存市場日較新的報價）；開啟市場時以唯讀 `game-state` 取得歷史（`controller.refreshMarket()`），本機時間超過 `nextRefreshAt` 時也重新取得。售價用引擎 `artifactSalePrice` 顯示，**不重新實作定價** |
+| 歷史讀取【v1.16】 | 頁面以 `controller.watchMarket()` 訂閱：沒有歷史 / 已過更新時間才讀取；bootstrap、結算、交易進行中時排隊，結束後讀取；失敗或伺服器仍是舊報價時退避（2 秒起、最多 60 秒、尊重 Retry-After）；離開頁面即停止，已有歷史時重新進入不送請求 |
 | 報價狀態 | `valid` / `refreshing`（本機時間已過更新時間，只是顯示）/ `unavailable`（倍率為空：不顯示價格、不能出售，不使用任何備用倍率）/ `none` |
 | 寶物卡 | 圖示、名稱、Epic / Legendary、礦區、基礎價值、今日售價、倍率、持有數、是否屬於生效中的套組。未發現的寶物沿用圖鑑規則：只顯示礦區與稀有度，不顯示名稱、外觀與行情 |
 | 走勢 | 伺服器歷史（最多 6 天 + 今天）畫成 SVG 折線，可展開日期 / 倍率 / 價格表；少於 2 天顯示「尚無歷史行情」。漲跌只在歷史中確實有「昨天」時顯示（不與基礎價比較、不補假資料） |
-| 選擇 | 每種寶物選件數（− / ＋ / 全部），轉成 `heldArtifacts` 中的 instanceId（先賣較新取得的）；件數永遠不超過目前持有；一次最多 `MAX_ARTIFACTS_PER_SALE`（100） |
+| 選擇 | 每種寶物選件數（− / ＋ / 全部），轉成 `heldArtifacts` 中的 instanceId（先賣較新取得的）；件數永遠不超過目前持有；**多種合計不超過 `MAX_ARTIFACTS_PER_SALE`（100）**：「全部」只補到上限、顯示還可再選的件數【v1.16】；伺服器另外驗證（超過 100 件 → `INVALID_REQUEST`） |
+| 成交提示【v1.16】 | 只對應成功的那一個 Request ID（取自該次 `artifacts_sold` 事件）；新交易開始、之後有其他操作結果、換帳號時不再顯示 |
 | 確認 | 名稱、實際實例 ID、件數、單價 / 倍率、小計與預估總收入、市場日、出售後剩餘；開啟時固定要出售的實例，持有狀態改變（例如其他分頁已出售）時停用確認並提供「重新選擇」 |
 | 套組影響 | 以引擎 `activeSets` 比較出售前後的持有數量：只列出「出售前生效、出售後失效」的套組（例：「出售後將失去老礦工套組效果：Speed ×1.03」），可同時列出多個；有影響時標題、按鈕（「仍要出售」）與警告框都不同。只是預測，結果以伺服器回應為準 |
 | 送出 | `{ type: "sell_artifacts", instanceIds, marketDate }`（畫面上報價的市場日），經由既有的 `controller.perform`（未確認操作、Web Lock、冪等）；不送價格 / 倍率；不做 optimistic update，金幣、持有、套組、能力值只來自伺服器回應；成交金額取自 `artifacts_sold` 事件 |

@@ -20,7 +20,7 @@ import {
   toPlayerView,
   validateState,
 } from "@mining/game-engine";
-import { type GameDb, GameDbError, type MarketSnapshot } from "./db.ts";
+import { type ExpiredRecord, type GameDb, GameDbError, type MarketSnapshot, type RateLimit } from "./db.ts";
 import { base64ToBytes, bytesToHex, utf8 } from "./encoding.ts";
 import { type ApiErrorCode, type ApiResponse, RETRYABLE } from "./response.ts";
 
@@ -48,9 +48,30 @@ export interface HandleOptions {
   /** 伺服器端紀錄（錯誤細節只寫在這裡，不回傳給 Client） */
   log?: (event: string, detail: Record<string, unknown>) => void;
   maxAttempts?: number;
+  /** 伺服器端的 rate limit（只計新的請求；重送不受限）。未提供 = 不限制（測試 / 內部） */
+  rateLimit?: RateLimit;
+  /**
+   * 「只調和、不執行」（Client 的未確認操作超過有效期限，TECHNICAL_SPEC §10.8）：
+   * key 已存在 → 回傳原本的結果；不存在 → **不執行**，寫下作廢紀錄（REQUEST_EXPIRED, processed = false），
+   * 之後同一個 key 的原始請求即使晚到也只會得到這個作廢結果。
+   */
+  expireIfUnknown?: boolean;
 }
 
-const fail = (requestId: string | null, command: string | null, code: ApiErrorCode, message: string): ApiResponse => ({
+const expiredResponse = (requestId: string, command: string | null, r: ExpiredRecord): ApiResponse => ({
+  ok: false,
+  requestId,
+  command,
+  error: { code: "REQUEST_EXPIRED", message: "this request was already processed; its detailed result is no longer stored" },
+  expired: { processed: true, ok: r.ok, processedAt: r.processedAt },
+});
+
+const rateLimited = (requestId: string | null, command: string | null, retryAfterMs: number): ApiResponse => ({
+  ...fail(requestId, command, "RATE_LIMITED", "too many requests; retry later with the same Idempotency-Key"),
+  retryAfterMs,
+});
+
+const fail = (requestId: string | null, command: string | null, code: ApiErrorCode, message: string): Extract<ApiResponse, { ok: false }> => ({
   ok: false,
   requestId,
   command,
@@ -132,10 +153,38 @@ export async function handleGameRequest(
   try {
     while (attempts < maxAttempts) {
       attempts++;
-      const snap = await db.loadSnapshot(input.playerId, requestId, hash);
+      // rate limit 只在第一次嘗試計數（CAS 重試不重複計數）；作廢探詢屬於調和，不受限
+      const snap = await db.loadSnapshot(input.playerId, requestId, hash, attempts === 1 && !options.expireIfUnknown ? options.rateLimit : undefined);
       if (snap.status === "replay") return out(snap.response, { replayed: true, attempts, stored: true });
+      if (snap.status === "expired") return out(expiredResponse(requestId, command.type, snap), { replayed: true, attempts, stored: true });
+      if (snap.status === "rate_limited") {
+        log("rate_limited", { playerId: input.playerId, requestId, command: command.type, retryAfterMs: snap.retryAfterMs });
+        return out(rateLimited(requestId, command.type, snap.retryAfterMs), { attempts });
+      }
       if (snap.status === "mismatch") return out(fail(requestId, command.type, "IDEMPOTENCY_MISMATCH", "this Idempotency-Key was used for a different request"), { attempts });
       if (snap.status === "not_found") return out(fail(requestId, command.type, "CHARACTER_NOT_FOUND", "create a character first"), { attempts });
+
+      if (options.expireIfUnknown) {
+        // 從未收到過這個 key：不執行，寫下作廢紀錄（同一交易的 CAS 與唯一鍵保證晚到的原始請求不會再執行）
+        const version = (snap.state as PlayerGameState).stateVersion;
+        const response: ApiResponse = {
+          ok: false,
+          requestId,
+          command: command.type,
+          error: { code: "REQUEST_EXPIRED", message: "this request expired before it was executed; it will never be executed" },
+          expired: { processed: false, ok: null, processedAt: null },
+        };
+        const c = await db.commit({ playerId: input.playerId, expectedVersion: version, idempotencyKey: requestId, requestHash: hash, command: command.type, state: null, reportCreated: null, reportClaimed: null, response });
+        if (c.status === "recorded" || c.status === "committed") {
+          log("request_expired", { playerId: input.playerId, requestId, command: command.type });
+          return out(response, { attempts, stored: true });
+        }
+        if (c.status === "replay") return out(c.response, { replayed: true, attempts, stored: true });
+        if (c.status === "expired") return out(expiredResponse(requestId, command.type, c), { replayed: true, attempts, stored: true });
+        if (c.status === "mismatch") return out(fail(requestId, command.type, "IDEMPOTENCY_MISMATCH", "this Idempotency-Key was used for a different request"), { attempts });
+        if (c.status === "not_found") return out(fail(requestId, command.type, "CHARACTER_NOT_FOUND", "create a character first"), { attempts });
+        continue; // version_conflict：重新載入
+      }
 
       const result = executeRequest(snap.state as PlayerGameState, { requestId, command }, {
         serverNow: snap.serverNow,
@@ -176,6 +225,8 @@ export async function handleGameRequest(
           return out(response, { attempts, stored: true });
         case "replay": // 同一個 key 並行送出：另一個請求先提交了
           return out(c.response, { replayed: true, attempts, stored: true });
+        case "expired":
+          return out(expiredResponse(requestId, command.type, c), { replayed: true, attempts, stored: true });
         case "mismatch":
           return out(fail(requestId, command.type, "IDEMPOTENCY_MISMATCH", "this Idempotency-Key was used for a different request"), { attempts });
         case "not_found":
@@ -201,6 +252,13 @@ export async function createCharacter(db: GameDb, playerId: string, options: Han
   const log = options.log ?? (() => {});
   if (!isUuid(playerId)) return fail(null, "character_create", "INTERNAL_ERROR", "invalid player identity");
   try {
+    if (options.rateLimit) {
+      const wait = await db.rateLimit(playerId, options.rateLimit);
+      if (wait > 0) {
+        log("rate_limited", { playerId, op: "create", retryAfterMs: wait });
+        return rateLimited(null, "character_create", wait);
+      }
+    }
     const r = await db.createPlayer(playerId, createInitialState(playerId, 0));
     if (r.status === "no_auth_user") return fail(null, "character_create", "INTERNAL_ERROR", "unknown user");
     const view = toPlayerView(r.state);
@@ -219,7 +277,11 @@ export async function readState(db: GameDb, playerId: string, options: HandleOpt
   const log = options.log ?? (() => {});
   if (!isUuid(playerId)) return fail(null, "state", "INTERNAL_ERROR", "invalid player identity");
   try {
-    const snap = await db.loadSnapshot(playerId, null, null);
+    const snap = await db.loadSnapshot(playerId, null, null, options.rateLimit);
+    if (snap.status === "rate_limited") {
+      log("rate_limited", { playerId, op: "read", retryAfterMs: snap.retryAfterMs });
+      return rateLimited(null, "state", snap.retryAfterMs);
+    }
     if (snap.status !== "ok") return fail(null, "state", "CHARACTER_NOT_FOUND", "create a character first");
     // 輸出前先驗證：資料庫中的狀態不符合引擎不變式時，回傳受控的 INTERNAL_ERROR（細節只寫 log）
     const issues = validateState(snap.state);

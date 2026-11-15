@@ -20,7 +20,7 @@ export type ClientErrorCode = ApiErrorCode | "UNAUTHORIZED" | "NETWORK" | "BAD_R
 
 export type ApiResult =
   | { ok: true; status: number; body: OkResponse; replayed: boolean }
-  | { ok: false; status: number | null; code: ClientErrorCode; message: string; body: ErrResponse | null };
+  | { ok: false; status: number | null; code: ClientErrorCode; message: string; body: ErrResponse | null; retryAfterHeaderMs?: number };
 
 export interface GameApiOptions {
   /** `${SUPABASE_URL}/functions/v1` */
@@ -40,7 +40,9 @@ export interface GameApiOptions {
   retryDelaysMs?: readonly number[];
 }
 
-const RETRYABLE_CODES = new Set<ClientErrorCode>(["NETWORK", "SERVER_BUSY", "VERSION_CONFLICT"]);
+const RETRYABLE_CODES = new Set<ClientErrorCode>(["NETWORK", "SERVER_BUSY", "VERSION_CONFLICT", "RATE_LIMITED"]);
+/** RATE_LIMITED：Retry-After 在這個範圍內才在 API Client 內等待重試；更長的交給 Controller 排程（不阻塞畫面） */
+const MAX_INLINE_RETRY_AFTER_MS = 10_000;
 const RETRYABLE_STATUS = new Set([502, 503, 504]);
 
 /** 新的獨立操作使用新的 UUID；同一個操作的重試沿用 */
@@ -51,7 +53,16 @@ export function newRequestId(): string {
 export interface GameApi {
   getState(): Promise<ApiResult>;
   createCharacter(): Promise<ApiResult>;
-  action(command: GameCommand, requestId: string): Promise<ApiResult>;
+  /** expire = 未確認操作超過有效期限：只調和、不執行（伺服器回原本的結果或確認作廢） */
+  action(command: GameCommand, requestId: string, opts?: { expire?: boolean }): Promise<ApiResult>;
+}
+
+/** 回應中的 Retry-After（毫秒）：優先使用 body.retryAfterMs，其次 header（秒） */
+export function retryAfterOf(r: ApiResult): number | null {
+  if (r.ok) return null;
+  const fromBody = r.body?.retryAfterMs;
+  if (typeof fromBody === "number" && fromBody > 0) return fromBody;
+  return r.retryAfterHeaderMs ?? null;
 }
 
 export function createGameApi(opts: GameApiOptions): GameApi {
@@ -60,10 +71,11 @@ export function createGameApi(opts: GameApiOptions): GameApi {
   const delays = opts.retryDelaysMs ?? [500, 1_500, 3_500];
   const timeoutMs = opts.timeoutMs ?? 15_000;
 
-  async function once(fn: string, method: string, token: string, body: unknown, key: string | null): Promise<ApiResult> {
+  async function once(fn: string, method: string, token: string, body: unknown, key: string | null, expire = false): Promise<ApiResult> {
     const headers: Record<string, string> = { apikey: opts.anonKey, Authorization: `Bearer ${token}` };
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (key) headers["Idempotency-Key"] = key;
+    if (expire) headers["Idempotency-Expire"] = "true";
     let res: Response;
     try {
       res = await doFetch(`${opts.functionsUrl}/${fn}`, {
@@ -95,10 +107,11 @@ export function createGameApi(opts: GameApiOptions): GameApi {
       return { ok: false, status: res.status, code: "BAD_RESPONSE", message: `status ${res.status} does not match ok=${parsed.ok}`, body: null };
     }
     if (parsed.ok) return { ok: true, status: res.status, body: parsed, replayed: res.headers.get("Idempotent-Replayed") === "true" };
-    return { ok: false, status: res.status, code: parsed.error.code, message: parsed.error.message, body: parsed };
+    const ra = Number(res.headers.get("Retry-After"));
+    return { ok: false, status: res.status, code: parsed.error.code, message: parsed.error.message, body: parsed, ...(ra > 0 ? { retryAfterHeaderMs: ra * 1000 } : {}) };
   }
 
-  async function request(fn: string, method: string, body: unknown, key: string | null): Promise<ApiResult> {
+  async function request(fn: string, method: string, body: unknown, key: string | null, expire = false): Promise<ApiResult> {
     let token = await opts.getAccessToken();
     if (!token) {
       await opts.onUnauthorized?.();
@@ -106,7 +119,7 @@ export function createGameApi(opts: GameApiOptions): GameApi {
     }
     let refreshed = false;
     for (let attempt = 0; ; attempt++) {
-      const r = await once(fn, method, token, body, key);
+      const r = await once(fn, method, token, body, key, expire);
       if (!r.ok && r.code === "UNAUTHORIZED") {
         const next = refreshed ? null : await opts.refreshAccessToken();
         refreshed = true;
@@ -121,7 +134,10 @@ export function createGameApi(opts: GameApiOptions): GameApi {
       // 只有帶 Idempotency-Key 的請求（或唯讀請求）才自動重試
       const retryable = !r.ok && RETRYABLE_CODES.has(r.code) && (key !== null || method === "GET");
       if (!retryable || attempt >= delays.length) return r;
-      await sleep(delays[attempt]!);
+      // 超限：依 Retry-After 等待（太久就交給 Controller 排程）；重試永遠沿用同一個 key
+      const wait = !r.ok && r.code === "RATE_LIMITED" ? retryAfterOf(r) ?? delays[attempt]! : delays[attempt]!;
+      if (wait > MAX_INLINE_RETRY_AFTER_MS) return r;
+      await sleep(Math.max(wait, delays[attempt]!));
     }
   }
 
@@ -132,9 +148,10 @@ export function createGameApi(opts: GameApiOptions): GameApi {
       for (let attempt = 0; ; attempt++) {
         const r = await request("character-create", "POST", {}, null);
         if (r.ok || !RETRYABLE_CODES.has(r.code) || attempt >= delays.length) return r;
+        if (r.code === "RATE_LIMITED" && (retryAfterOf(r) ?? 0) > MAX_INLINE_RETRY_AFTER_MS) return r;
         await sleep(delays[attempt]!);
       }
     },
-    action: (command, requestId) => request("game-action", "POST", { command }, requestId),
+    action: (command, requestId, o) => request("game-action", "POST", { command }, requestId, o?.expire === true),
   };
 }

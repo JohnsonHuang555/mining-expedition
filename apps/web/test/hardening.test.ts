@@ -25,7 +25,7 @@ async function twoTabs(opts: { sharedLock: boolean }) {
   const b = rig({ backend, userId, pendingStore: storage, actionLock: lock() });
   await b.controller.bootstrap();
   const count = (type: string) => backend.requests.filter((x) => isCmd(type)(x.fn, x.body)).length;
-  const committed = (type: string) => [...backend.log.values()].filter((l) => l.response.command === type && l.response.ok).length;
+  const committed = (type: string) => [...backend.log.values()].filter((l) => l.response?.command === type && l.response?.ok).length;
   return { backend, userId, storage, a, b, count, committed, server: () => backend.state(userId)! };
 }
 

@@ -75,7 +75,7 @@ describe("Runtime 生命週期", () => {
   it("未確認操作依使用者分開保存：換帳號不會讀到上一位玩家的操作", () => {
     const a = crypto.randomUUID();
     const b = crypto.randomUUID();
-    const p = { requestId: crypto.randomUUID(), command: { type: "craft", materialId: "iron_ingot", times: 1 } as const, createdAt: 1 };
+    const p = { requestId: crypto.randomUUID(), command: { type: "craft", materialId: "iron_ingot", times: 1 } as const, createdAt: Date.now() };
     browserPendingStore(a).put(p);
     expect(localStorage.getItem(pendingStorageKey(a, p.requestId))).not.toBeNull();
     expect(browserPendingStore(b).list()).toEqual([]);

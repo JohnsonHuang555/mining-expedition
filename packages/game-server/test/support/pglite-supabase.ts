@@ -68,7 +68,12 @@ export async function startPgliteSupabase(): Promise<PgliteSupabase> {
   const j = (v: unknown) => (v === null || v === undefined ? null : JSON.stringify(v));
   const db: GameDb = {
     createPlayer: (playerId, state) => rpc<CreateResult>("game_create_player", "$1::uuid, $2::jsonb", [playerId, j(state)]),
-    loadSnapshot: (playerId, key, hash) => rpc<LoadResult>("game_load_snapshot", "$1::uuid, $2::uuid, $3::text", [playerId, key, hash]),
+    loadSnapshot: (playerId, key, hash, rate) =>
+      rpc<LoadResult>("game_load_snapshot", "$1::uuid, $2::uuid, $3::text, $4::text, $5::integer, $6::integer", [playerId, key, hash, rate?.bucket ?? null, rate?.limit ?? null, rate?.windowMs ?? null]),
+    rateLimit: async (playerId, rate) => {
+      const r = await rpc<{ status: string; retryAfterMs?: number }>("game_rate_limit", "$1::uuid, $2::text, $3::integer, $4::integer", [playerId, rate.bucket, rate.limit, rate.windowMs]);
+      return r.status === "rate_limited" ? Number(r.retryAfterMs) : 0;
+    },
     commit: (a: CommitArgs) =>
       rpc<CommitResult>(
         "game_commit",

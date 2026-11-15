@@ -13,7 +13,7 @@ function seed(userId: string, entries: ({ valid: PendingAction } | { invalidKey:
     else localStorage.setItem(e.invalidKey, e.raw);
   }
 }
-const sell = (q: number, at: number): PendingAction => ({ requestId: crypto.randomUUID(), command: { type: "sell_items", itemId: "stone", quantity: q }, createdAt: at });
+const sell = (q: number, at: number): PendingAction => ({ requestId: crypto.randomUUID(), command: { type: "sell_items", itemId: "stone", quantity: q }, createdAt: Date.now() + at });
 
 describe("browserPendingStore.list()：清理無效紀錄時不漏讀", () => {
   it("無效紀錄排在有效紀錄前面：有效紀錄當次全部讀到，無效紀錄被移除", () => {
@@ -56,7 +56,7 @@ describe("browserPendingStore.list()：清理無效紀錄時不漏讀", () => {
       s.inventory = { stone: 200 };
     });
     // 兩筆交易都已提交但回應遺失
-    const buy: PendingAction = { requestId: crypto.randomUUID(), command: { type: "purchase_pickaxe", pickaxeId: "pick_stone" }, createdAt: 1 };
+    const buy: PendingAction = { requestId: crypto.randomUUID(), command: { type: "purchase_pickaxe", pickaxeId: "pick_stone" }, createdAt: Date.now() + 1 };
     const sale = sell(10, 2);
     backend.faults.push("drop_response", "network", "network", "network"); // 購買已提交，回應全部遺失
     expect(await first.controller.perform(buy.command)).toBe("uncertain");
@@ -85,7 +85,7 @@ describe("browserPendingStore.list()：清理無效紀錄時不漏讀", () => {
     expect(localStorage.length).toBe(0);
     const s = backend.state(u)!;
     expect(s.pickaxes.pick_stone).toBe(1);
-    expect([...backend.log.values()].filter((l) => l.response.command === "purchase_pickaxe" && l.response.ok)).toHaveLength(1);
+    expect([...backend.log.values()].filter((l) => l.response?.command === "purchase_pickaxe" && l.response?.ok)).toHaveLength(1);
     // 購買沒有再扣一次；出售在調和時第一次執行（+10）；結算可能另外加少量金幣
     expect(s.coins).toBeGreaterThanOrEqual(coinsAfterBuy + 10);
     expect(s.coins).toBeLessThan(coinsAfterBuy + 200);

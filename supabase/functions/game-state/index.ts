@@ -3,11 +3,14 @@
 // 要把時間推進到現在（可能產生離線報告），用 game-action 的 { "type": "settle" }。
 
 import { readState } from "@mining/game-server";
-import { authenticate, errorResponse, gameDb, log, respond, serve } from "../_shared/api.ts";
+import { RATE_LIMITS, authenticate, errorResponse, gameDb, log, logRequest, respond, serve } from "../_shared/api.ts";
 
 serve(["GET"], async (req, timing) => {
   const userId = await authenticate(req, timing);
   if (userId instanceof Response) return userId;
   if (new URL(req.url).searchParams.size > 0) return errorResponse(400, "INVALID_REQUEST", "game-state takes no parameters");
-  return respond(await readState(gameDb(timing), userId, { log }), timing);
+  const response = await readState(gameDb(timing), userId, { log, rateLimit: RATE_LIMITS["game-state"] });
+  const res = respond(response, timing);
+  logRequest("game-state", userId, null, response, res.status, timing);
+  return res;
 });

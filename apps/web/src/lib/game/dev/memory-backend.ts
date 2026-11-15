@@ -8,7 +8,7 @@
 
 import { ARTIFACT_IDS, type ArtifactId } from "@mining/game-data";
 import { type PlayerGameState, addMarketDays, cloneState, marketDateOf, marketMultiplierFor, nextMarketRefreshAt, sha256 } from "@mining/game-engine";
-import { type ApiResponse, type CommitArgs, type GameDb, type MarketSnapshot, createCharacter, handleGameRequest, httpStatus, readState } from "@mining/game-server";
+import { type ApiResponse, type CommitArgs, type GameDb, type MarketSnapshot, type RateLimit, createCharacter, handleGameRequest, httpStatus, readState } from "@mining/game-server";
 
 interface Row {
   state: PlayerGameState;
@@ -20,7 +20,9 @@ export type Fault = "network" | "busy" | "unauthorized" | "drop_response" | "mal
 export class MemoryBackend {
   now: number;
   readonly players = new Map<string, Row>();
-  readonly log = new Map<string, { hash: string; response: ApiResponse }>();
+  readonly log = new Map<string, { hash: string; response: ApiResponse | null; ok?: boolean; committed?: boolean; at?: number }>();
+  /** 測試：rate limit 計數（每位使用者 + bucket 的固定視窗；與資料庫相同的規則） */
+  readonly rateHits = new Map<string, { window: number; hits: number }>();
   readonly tokens = new Map<string, string>();
   /** 接下來的請求依序套用的故障 */
   readonly faults: Fault[] = [];
@@ -33,6 +35,8 @@ export class MemoryBackend {
   /** 每日市場倍率（與資料庫相同的演算法：引擎參考實作；只新增不修改） */
   readonly market = new Map<string, Partial<Record<ArtifactId, number>>>();
   private readonly marketSecret = sha256(new TextEncoder().encode("dev-memory-market"));
+  /** 測試：啟用與 Edge Function 相同的 rate limit（預設關閉，避免影響其他測試） */
+  rateLimits: Readonly<Record<RateLimit["bucket"], RateLimit>> | null = null;
   /** 測試：模擬當日價格無法產生 */
   marketUnavailable = false;
 
@@ -62,6 +66,24 @@ export class MemoryBackend {
       s.createdAt -= ms;
       s.lastSettledAt -= ms;
     });
+  }
+
+  hitRate(userId: string, rate: { bucket: string; limit: number; windowMs: number }): number {
+    const k = `${userId}:${rate.bucket}`;
+    const window = this.now - (this.now % rate.windowMs);
+    const cur = this.rateHits.get(k);
+    const hits = cur && cur.window === window ? cur.hits + 1 : 1;
+    this.rateHits.set(k, { window, hits });
+    return hits > rate.limit ? Math.max(1, window + rate.windowMs - this.now) : 0;
+  }
+
+  /** 測試：action_log compaction（等同 private.action_log_compact）：settle 刪除，其他只保留冪等識別 */
+  compactLog(): void {
+    for (const [k, l] of this.log) {
+      if (l.response === null) continue;
+      if (l.response.command === "settle") this.log.delete(k);
+      else this.log.set(k, { ...l, ok: l.response.ok, response: null });
+    }
   }
 
   /** 延遲生成到指定市場日（等同 private.market_ensure） */
@@ -107,24 +129,37 @@ export class MemoryBackend {
         this.players.set(playerId, { state, secret });
         return { status: "created", state: cloneState(state) };
       },
-      loadSnapshot: async (playerId, key, hash) => {
+      loadSnapshot: async (playerId, key, hash, rate) => {
         if (key) {
           const l = this.log.get(`${playerId}:${key}`);
-          if (l) return l.hash === hash ? { status: "replay", response: structuredClone(l.response) } : { status: "mismatch" };
+          if (l) {
+            if (l.hash !== hash) return { status: "mismatch" };
+            if (l.response === null) return { status: "expired", ok: l.ok ?? false, committed: l.committed ?? false, processedAt: l.at ?? 0 };
+            return { status: "replay", response: structuredClone(l.response) };
+          }
+        }
+        if (rate) {
+          const wait = this.hitRate(playerId, rate);
+          if (wait > 0) return { status: "rate_limited", retryAfterMs: wait };
         }
         const row = this.players.get(playerId);
         if (!row) return { status: "not_found" };
         return { status: "ok", state: cloneState(row.state), rngSecret: row.secret, serverNow: this.now, market: this.marketSnapshot() };
       },
+      rateLimit: async (playerId, rate) => this.hitRate(playerId, rate),
       commit: async (a: CommitArgs) => {
         const k = `${a.playerId}:${a.idempotencyKey}`;
         const l = this.log.get(k);
-        if (l) return l.hash === a.requestHash ? { status: "replay", response: structuredClone(l.response) } : { status: "mismatch" };
+        if (l) {
+          if (l.hash !== a.requestHash) return { status: "mismatch" };
+          if (l.response === null) return { status: "expired", ok: l.ok ?? false, committed: l.committed ?? false, processedAt: l.at ?? 0 };
+          return { status: "replay", response: structuredClone(l.response) };
+        }
         const row = this.players.get(a.playerId);
         if (!row) return { status: "not_found" };
         if (row.state.stateVersion !== a.expectedVersion) return { status: "version_conflict", stateVersion: row.state.stateVersion };
         if (a.state) row.state = cloneState(a.state);
-        this.log.set(k, { hash: a.requestHash, response: structuredClone(a.response) });
+        this.log.set(k, { hash: a.requestHash, response: structuredClone(a.response), committed: !!a.state, at: this.now });
         return { status: a.state ? "committed" : "recorded", stateVersion: row.state.stateVersion };
       },
     };
@@ -159,15 +194,18 @@ export class MemoryBackend {
     let r: ApiResponse;
     let replayed = false;
     if (fn === "character-create") {
-      r = await createCharacter(db, userId);
+      r = await createCharacter(db, userId, this.rateLimits ? { rateLimit: this.rateLimits["character-create"] } : {});
       if (fault === "drop_response") return this.dropped(fn, key, body);
       return respond(r.ok ? 201 : httpStatus(r), r);
     }
     if (fn === "game-state") {
-      r = await readState(db, userId);
+      r = await readState(db, userId, this.rateLimits ? { rateLimit: this.rateLimits["game-state"] } : {});
     } else if (fn === "game-action") {
       if (!key) return respond(400, { ok: false, requestId: null, command: null, error: { code: "INVALID_REQUEST", message: "Idempotency-Key header is required" } });
-      const out = await handleGameRequest(db, { playerId: userId, requestId: key, command: body?.command });
+      const out = await handleGameRequest(db, { playerId: userId, requestId: key, command: body?.command }, {
+        ...(this.rateLimits ? { rateLimit: this.rateLimits["game-action"] } : {}),
+        expireIfUnknown: headers.get("Idempotency-Expire") === "true",
+      });
       r = out.response;
       replayed = out.replayed;
     } else {
@@ -177,7 +215,8 @@ export class MemoryBackend {
     if (fault === "drop_response") return this.dropped(fn, key, body);
     // 伺服器已提交，但回應在途中損壞
     if (fault === "malformed_after_commit") return respond(200, { ...r, state: { state: null } });
-    return respond(httpStatus(r), r, { "Idempotent-Replayed": String(replayed) });
+    const retryAfter: Record<string, string> = !r.ok && r.retryAfterMs !== undefined ? { "Retry-After": String(Math.max(1, Math.ceil(r.retryAfterMs / 1000))) } : {};
+    return respond(httpStatus(r), r, { "Idempotent-Replayed": String(replayed), ...retryAfter });
   };
 
   private dropped(fn: string, key: string | null, body: unknown): never {
