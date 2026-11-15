@@ -345,13 +345,11 @@ describe("Web Client × 真實 Supabase Local", () => {
     expect(v2.stats.speed1000).toBe(1_030);
     expect(v2.stats).toEqual(computeStats(v2.state.equippedPickaxe, v2.state.pickaxes[v2.state.equippedPickaxe]!, heldCounts(v2.state)));
 
-    // 4. 出售一個成員（伺服器既有的 sell_artifacts；測試準備當日市場倍率，UI 本階段不開放寶物出售）
-    await pool.query(
-      `insert into public.market_prices (price_date, artifact_id, multiplier_ppm) values ((now() at time zone 'Asia/Taipei')::date, 'a_z1_badge', 1000000) on conflict do nothing`,
-    );
+    // 4. 出售一個成員（伺服器既有的 sell_artifacts；當日倍率由伺服器延遲生成，帶上報價的市場日）
     // 離線掉落可能已經有不只一件徽章：全部出售，才是「不再持有這個成員」
     const badges = v2.state.heldArtifacts.filter((a) => a.artifactId === "a_z1_badge").map((a) => a.instanceId);
-    expect(await t.controller.perform({ type: "sell_artifacts", instanceIds: badges })).toBe("ok");
+    const marketDate = t.store.getState().market!.date;
+    expect(await t.controller.perform({ type: "sell_artifacts", instanceIds: badges, marketDate })).toBe("ok");
     const v3 = t.store.getState().view!;
     const row = setRows(v3.state).find((x) => x.id === "old_miner")!;
     expect(row).toMatchObject({ active: false, ownedNow: false, allDiscovered: true });

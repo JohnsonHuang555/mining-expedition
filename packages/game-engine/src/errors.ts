@@ -16,7 +16,9 @@ export type GameErrorCode =
   | "INSUFFICIENT_ITEMS"
   | "PREREQUISITE_MISSING" //  未擁有、未依序、未到達、Power 不足、不可重挖等
   | "MAX_LEVEL"
-  | "ZONE_LOCKED";
+  | "ZONE_LOCKED"
+  | "MARKET_QUOTE_EXPIRED" //  出售時帶的報價市場日已過（跨日）：以新報價重新確認
+  | "MARKET_UNAVAILABLE"; //   當日市場價格無法取得（暫時性；不保存，可用同一個 key 重試）
 
 export interface GameError {
   code: GameErrorCode;

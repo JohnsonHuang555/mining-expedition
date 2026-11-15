@@ -28,6 +28,7 @@ import {
 import { type GameError, gameError } from "./errors.ts";
 import type { GameEvent } from "./events.ts";
 import { mulDivFloor } from "./fixed.ts";
+import { isMarketDate } from "./market.ts";
 import { type ZoneIndex, revisitSpot, revisitableZones, reworkBand } from "./mining.ts";
 import { addItems, addSafe, checkLoadedState, heldCountsOf, pushSetChanges, recordDiscovery } from "./settle.ts";
 import { type Inventory, type PlayerGameState, cloneState, currentStats } from "./state.ts";
@@ -44,7 +45,11 @@ export type GameAction =
   | { type: "upgrade_pickaxe"; pickaxeId: PickaxeId }
   | { type: "craft"; materialId: MaterialId; times: number }
   | { type: "sell_items"; itemId: MineralId; quantity: number }
-  | { type: "sell_artifacts"; instanceIds: string[] }
+  /**
+   * marketDate：玩家確認時看到的市場日（報價的有效日期）。與伺服器交易時的市場日不同 → MARKET_QUOTE_EXPIRED，
+   * 不會以玩家沒看過的價格成交。成交價仍只由伺服器的當日倍率計算（Client 不能提交價格或倍率）。
+   */
+  | { type: "sell_artifacts"; instanceIds: string[]; marketDate: string }
   | { type: "unlock_zone"; zone: ZoneIndex }
   | { type: "select_mining_mode"; mode: MiningMode; zone?: ZoneIndex }
   | { type: "claim_report"; reportId: string };
@@ -54,6 +59,8 @@ export interface ActionContext {
   serverNow?: number;
   /** 當日市場倍率（ppm，GBS §13），出售寶物時必須提供；由伺服器的 market_prices 載入 */
   marketMultiplierPpm?: Partial<Record<ArtifactId, number>>;
+  /** 伺服器交易時的市場日（Asia/Taipei）；出售寶物時必須提供 */
+  marketDate?: string;
 }
 
 export type ActionResult =
@@ -95,12 +102,13 @@ export function parseAction(raw: unknown): { ok: true; action: GameAction } | { 
       return { ok: true, action: { type: "sell_items", itemId: r.itemId, quantity: r.quantity } };
     case "sell_artifacts": {
       const ids = r.instanceIds;
-      if (!expectKeys("instanceIds") || !Array.isArray(ids) || ids.length === 0 || ids.length > MAX_ARTIFACTS_PER_SALE) {
+      if (!expectKeys("instanceIds", "marketDate") || !Array.isArray(ids) || ids.length === 0 || ids.length > MAX_ARTIFACTS_PER_SALE) {
         return bad(`instanceIds must be a non-empty array of at most ${MAX_ARTIFACTS_PER_SALE}`);
       }
       if (!ids.every((x) => typeof x === "string" && x.length > 0 && x.length <= 64)) return bad("instanceIds must be strings");
       if (new Set(ids).size !== ids.length) return bad("instanceIds must be unique");
-      return { ok: true, action: { type: "sell_artifacts", instanceIds: [...(ids as string[])] } };
+      if (!isMarketDate(r.marketDate)) return bad("marketDate must be the quote's market date (YYYY-MM-DD)");
+      return { ok: true, action: { type: "sell_artifacts", instanceIds: [...(ids as string[])], marketDate: r.marketDate } };
     }
     case "unlock_zone":
       if (!expectKeys("zone") || (r.zone !== 1 && r.zone !== 2)) return bad("zone must be 1 or 2");
@@ -239,6 +247,9 @@ export function applyAction(input: PlayerGameState, action: GameAction, ctx: Act
       break;
     }
     case "sell_artifacts": {
+      // 報價的市場日必須是伺服器交易時的市場日（跨日 / 舊頁面 → 請 Client 以新報價重新確認）
+      if (ctx.marketDate === undefined || !ctx.marketMultiplierPpm) return fail("MARKET_UNAVAILABLE", "market prices are not available right now");
+      if (a.marketDate !== ctx.marketDate) return fail("MARKET_QUOTE_EXPIRED", `the quote for ${a.marketDate} has expired; the market day is now ${ctx.marketDate}`);
       const byId = new Map(state.heldArtifacts.map((x) => [x.instanceId, x]));
       let coins = 0;
       for (const id of a.instanceIds) {
@@ -247,8 +258,9 @@ export function applyAction(input: PlayerGameState, action: GameAction, ctx: Act
         const def = ARTIFACTS[inst.artifactId];
         const mult = ctx.marketMultiplierPpm?.[inst.artifactId];
         const range = MARKET_MULTIPLIER_RANGE_PPM[def.rarity];
-        if (mult === undefined || !Number.isSafeInteger(mult) || mult < range.min || mult > range.max) {
-          return fail("INVALID_REQUEST", `market price for ${inst.artifactId} is missing or out of range (GBS §13)`);
+        if (mult === undefined) return fail("MARKET_UNAVAILABLE", `today's market price for ${inst.artifactId} is not available`);
+        if (!Number.isSafeInteger(mult) || mult < range.min || mult > range.max) {
+          return fail("INVALID_STATE", `market price for ${inst.artifactId} is out of range (GBS §13)`);
         }
         coins = addSafe(coins, mulDivFloor([def.baseValue, mult], PPM)); // CurrentValue = floor(BaseValue × multiplier)
       }

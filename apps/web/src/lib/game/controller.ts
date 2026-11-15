@@ -19,7 +19,7 @@
  */
 
 import type { MiningMode } from "@mining/game-data";
-import { type GameCommand, type GameEvent, type OfflineReport, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
+import { type GameCommand, type GameEvent, type MarketQuote, type OfflineReport, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
 import { type ApiResult, type GameApi, newRequestId } from "./api";
 import { type ActionLock, LOCK_TIMEOUT, type PendingAction, type PendingStore, memoryActionLock, memoryPendingStore, sameCommand } from "./pending";
 import { type RevealItem, RevealQueue } from "./reveal";
@@ -109,6 +109,8 @@ const MESSAGES: Partial<Record<string, string>> = {
   UNCERTAIN: "網路不穩，操作結果尚未確認；恢復連線後會以同一筆請求自動確認（不會重複扣款）",
   PENDING_OTHER: "上一個操作（可能在其他分頁）的結果尚未確認，確認後才能進行其他操作",
   LOCKED: "其他分頁正在進行交易，請稍後再試",
+  MARKET_QUOTE_EXPIRED: "市場價格已更新（換日），請確認新的報價後再出售",
+  MARKET_UNAVAILABLE: "今日市場價格暫時無法取得，請稍後再試",
 };
 export const messageFor = (code: string, fallback?: string) => MESSAGES[code] ?? fallback ?? "操作失敗";
 
@@ -464,8 +466,18 @@ export class GameController {
     this.channel?.post(body.stateVersion);
   }
 
+  /** 市場報價：只接受市場日不比目前舊的（Replay 的舊回應不會覆蓋新報價；同一天以較新的回應為準） */
+  private applyMarket(m: MarketQuote | undefined): void {
+    if (!m) return;
+    const cur = this.state.market;
+    if (cur && m.date < cur.date) return;
+    const history = m.history ?? (cur && cur.date === m.date ? cur.history : undefined);
+    this.set({ market: history ? { ...m, history } : m });
+  }
+
   private applyView(r: Extract<ApiResult, { ok: true }>, fresh: boolean): void {
     this.set({ view: r.body.state, fresh, receivedAt: this.clock.now(), phase: "ready", error: null });
+    this.applyMarket(r.body.market);
     this.revealNewlyHeld(r.body.state.state);
   }
 
@@ -539,6 +551,7 @@ export class GameController {
       this.set({ phase: "no_character" });
       return;
     }
+    this.applyMarket(r.body?.market);
     // 遊戲規則拒絕時附上的狀態：顯示，但不是「現在」的狀態（不預測）
     if (r.body?.state) {
       this.set({ view: r.body.state, fresh: false, receivedAt: this.clock.now() });

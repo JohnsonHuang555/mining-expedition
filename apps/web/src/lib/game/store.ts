@@ -7,7 +7,7 @@
 
 import { createStore } from "zustand/vanilla";
 import type { ArtifactId, ItemId } from "@mining/game-data";
-import type { GameCommand, GameEvent, PlayerStateView, SettleSummary } from "@mining/game-engine";
+import type { GameCommand, GameEvent, MarketQuote, PlayerStateView, SettleSummary } from "@mining/game-engine";
 import type { PendingAction } from "./pending";
 import type { RevealItem } from "./reveal";
 
@@ -65,6 +65,11 @@ export interface GameUiState {
   /** 最近一次結算摘要（「最新挖掘成果」） */
   lastSettlement: { summary: SettleSummary; blocks: LootEntry[]; at: number } | null;
   recentLoot: LootEntry[];
+  /**
+   * 最新的市場報價（伺服器回應附帶；市場日較新的優先，Replay 的舊回應不會蓋掉新報價）。
+   * 只是報價：出售時帶上它的市場日，伺服器在交易時以當日倍率決定成交價；跨日會回 MARKET_QUOTE_EXPIRED。
+   */
+  market: MarketQuote | null;
   sync: { ok: boolean; lastOkAt: number | null; failures: number; message: string | null };
   /** 給玩家的一次性提示（例如「報告已在其他分頁領取」） */
   notice: string | null;
@@ -86,6 +91,7 @@ export const initialUiState = (): GameUiState => ({
   reveals: [],
   lastSettlement: null,
   recentLoot: [],
+  market: null,
   sync: { ok: true, lastOkAt: null, failures: 0, message: null },
   notice: null,
   error: null,

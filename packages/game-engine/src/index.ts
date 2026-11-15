@@ -109,10 +109,22 @@ export {
   executeRequest,
   parseCommand,
 } from "./request.ts";
+export {
+  type MarketQuote,
+  addMarketDays,
+  artifactSalePrice,
+  isMarketDate,
+  marketDateOf,
+  marketDayStart,
+  marketMessage,
+  marketMultiplierFor,
+  nextMarketRefreshAt,
+  nextMultiplierPpm,
+} from "./market.ts";
 export { type BlockPrediction, predictBlockProgress } from "./predict.ts";
 export { DEV_MARKER } from "./dev-marker.ts";
 
-export const ENGINE_VERSION = "0.3.0";
+export const ENGINE_VERSION = "0.4.0";
 
 export interface EngineInfo {
   engineVersion: string;

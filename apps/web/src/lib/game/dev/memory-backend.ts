@@ -6,8 +6,9 @@
  * 可注入：伺服器時間、網路錯誤 / 503、回應延遲；可直接改玩家狀態（測試準備）。
  */
 
-import { type PlayerGameState, cloneState } from "@mining/game-engine";
-import { type ApiResponse, type CommitArgs, type GameDb, createCharacter, handleGameRequest, httpStatus, readState } from "@mining/game-server";
+import { ARTIFACT_IDS, type ArtifactId } from "@mining/game-data";
+import { type PlayerGameState, addMarketDays, cloneState, marketDateOf, marketMultiplierFor, nextMarketRefreshAt, sha256 } from "@mining/game-engine";
+import { type ApiResponse, type CommitArgs, type GameDb, type MarketSnapshot, createCharacter, handleGameRequest, httpStatus, readState } from "@mining/game-server";
 
 interface Row {
   state: PlayerGameState;
@@ -28,6 +29,12 @@ export class MemoryBackend {
   /** 每個請求的人工延遲（毫秒） */
   latencyMs = 0;
   readonly requests: { fn: string; key: string | null; body: unknown; status: number | "network" }[] = [];
+
+  /** 每日市場倍率（與資料庫相同的演算法：引擎參考實作；只新增不修改） */
+  readonly market = new Map<string, Partial<Record<ArtifactId, number>>>();
+  private readonly marketSecret = sha256(new TextEncoder().encode("dev-memory-market"));
+  /** 測試：模擬當日價格無法產生 */
+  marketUnavailable = false;
 
   constructor(now = Date.UTC(2026, 10, 14, 12)) {
     this.now = now;
@@ -57,6 +64,32 @@ export class MemoryBackend {
     });
   }
 
+  /** 延遲生成到指定市場日（等同 private.market_ensure） */
+  ensureMarket(date: string): void {
+    if (this.marketUnavailable || this.market.has(date)) return;
+    const dates = [...this.market.keys()].filter((d) => d < date).sort();
+    let day = dates.length ? addMarketDays(dates[dates.length - 1]!, 1) : date;
+    while (day <= date) {
+      const prev = this.market.get(addMarketDays(day, -1));
+      const row: Partial<Record<ArtifactId, number>> = {};
+      for (const id of ARTIFACT_IDS) row[id] = marketMultiplierFor(this.marketSecret, day, id, prev?.[id] ?? 1_000_000);
+      this.market.set(day, row);
+      day = addMarketDays(day, 1);
+    }
+  }
+
+  marketSnapshot(): MarketSnapshot {
+    const date = marketDateOf(this.now);
+    this.ensureMarket(date);
+    const history = [];
+    for (let i = 1; i <= 6; i++) {
+      const d = addMarketDays(date, -i);
+      const m = this.market.get(d);
+      if (m) history.push({ date: d, multipliersPpm: { ...m } });
+    }
+    return { date, nextRefreshAt: nextMarketRefreshAt(this.now), multipliersPpm: { ...(this.market.get(date) ?? {}) }, history };
+  }
+
   state(userId: string): PlayerGameState | null {
     const r = this.players.get(userId);
     return r ? cloneState(r.state) : null;
@@ -79,7 +112,7 @@ export class MemoryBackend {
         }
         const row = this.players.get(playerId);
         if (!row) return { status: "not_found" };
-        return { status: "ok", state: cloneState(row.state), rngSecret: row.secret, serverNow: this.now, market: {} };
+        return { status: "ok", state: cloneState(row.state), rngSecret: row.secret, serverNow: this.now, market: this.marketSnapshot() };
       },
       commit: async (a: CommitArgs) => {
         const k = `${a.playerId}:${a.idempotencyKey}`;

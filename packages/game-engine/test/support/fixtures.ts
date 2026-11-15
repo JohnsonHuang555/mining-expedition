@@ -60,9 +60,12 @@ export function giveArtifact(s: PlayerGameState, artifactId: ArtifactId, instanc
 
 /** 以 executeRequest 模擬「提交成功」：回傳新狀態（沒有變化時回傳原狀態） */
 export function run(s: PlayerGameState, now: number, command: GameCommand, requestId = `req-${now}`): { s: PlayerGameState; r: RequestResult } {
-  const r = executeRequest(s, { requestId, command }, { serverNow: now, rng, marketMultiplierPpm: BASE_MARKET });
+  const r = executeRequest(s, { requestId, command }, { serverNow: now, rng, marketMultiplierPpm: BASE_MARKET, marketDate: MARKET_DATE });
   return { s: r.commit ? r.commit.state : s, r };
 }
+
+/** 測試用的市場日 */
+export const MARKET_DATE = "2026-11-16";
 
 /** 所有寶物倍率 1.0（Base Value） */
 export const BASE_MARKET: Partial<Record<ArtifactId, number>> = Object.fromEntries(

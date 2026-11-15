@@ -8,10 +8,10 @@ import {
   settle,
   validateState,
 } from "../src/index.ts";
-import { BASE_MARKET, HOUR, T0, deepFreeze, makeState, rng } from "./support/fixtures.ts";
+import { BASE_MARKET, HOUR, MARKET_DATE, T0, deepFreeze, makeState, rng } from "./support/fixtures.ts";
 
 const act = (s: PlayerGameState, a: GameAction | Record<string, unknown>, market = BASE_MARKET) =>
-  applyAction(deepFreeze(s), a as GameAction, { marketMultiplierPpm: market, serverNow: s.lastSettledAt });
+  applyAction(deepFreeze(s), a as GameAction, { marketMultiplierPpm: market, marketDate: MARKET_DATE, serverNow: s.lastSettledAt });
 const okState = (s: PlayerGameState, a: GameAction | Record<string, unknown>, market = BASE_MARKET): PlayerGameState => {
   const r = act(s, a, market);
   if (!r.ok) throw new Error(`expected ok: ${r.error.code} ${r.error.message}`);
@@ -118,7 +118,7 @@ describe("出售", () => {
   it("出售寶物：依市場倍率計價；套組立即失效；圖鑑保留", () => {
     const s = makeState({ tier: 1, artifacts: ["a_z1_lantern", "a_z1_badge", "a_z1_map"] });
     const speedWithSet = currentStats(s).speed1000;
-    const r = act(s, { type: "sell_artifacts", instanceIds: ["seed1"] }, { ...BASE_MARKET, a_z1_badge: 1_250_000 });
+    const r = act(s, { type: "sell_artifacts", instanceIds: ["seed1"], marketDate: MARKET_DATE }, { ...BASE_MARKET, a_z1_badge: 1_250_000 });
     if (!r.ok) throw new Error(r.error.message);
     expect(r.state.coins).toBe(375); // floor(300 × 1.25)
     expect(r.events).toContainEqual({ type: "set_changed", setId: "old_miner", active: false });
@@ -129,13 +129,24 @@ describe("出售", () => {
 
   it("出售寶物：未持有、重複 ID、缺少或超出範圍的市場價格都拒絕且不部分出售", () => {
     const s = makeState({ artifacts: ["a_z1_lantern", "a_z1_heart"] });
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0", "nope"] })).toBe("INSUFFICIENT_ITEMS");
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0", "seed0"] })).toBe("INVALID_REQUEST");
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: [] })).toBe("INVALID_REQUEST");
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"] }, {})).toBe("INVALID_REQUEST");
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed1"] }, { a_z1_heart: 1_600_000 })).toBe("INVALID_REQUEST");
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"] }, { a_z1_lantern: 700_000 })).toBe("INVALID_REQUEST"); // Epic 最低 0.80
-    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed1"] }, { a_z1_heart: 700_000 })).toBe("OK"); // Legendary 最低 0.70
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0", "nope"], marketDate: MARKET_DATE })).toBe("INSUFFICIENT_ITEMS");
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0", "seed0"], marketDate: MARKET_DATE })).toBe("INVALID_REQUEST");
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: [], marketDate: MARKET_DATE })).toBe("INVALID_REQUEST");
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"], marketDate: MARKET_DATE }, {})).toBe("MARKET_UNAVAILABLE"); // 當日沒有價格：不使用任何備用倍率
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed1"], marketDate: MARKET_DATE }, { a_z1_heart: 1_600_000 })).toBe("INVALID_STATE"); // 伺服器資料異常（不可提交）
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"], marketDate: MARKET_DATE }, { a_z1_lantern: 700_000 })).toBe("INVALID_STATE"); // Epic 最低 0.80
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed1"], marketDate: MARKET_DATE }, { a_z1_heart: 700_000 })).toBe("OK"); // Legendary 最低 0.70
+  });
+
+  it("出售寶物：報價的市場日必須是伺服器交易時的市場日（跨日 → MARKET_QUOTE_EXPIRED，不出售）", () => {
+    const s = makeState({ artifacts: ["a_z1_lantern"] });
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"], marketDate: "2026-11-15" })).toBe("MARKET_QUOTE_EXPIRED");
+    const r = applyAction(deepFreeze(s), { type: "sell_artifacts", instanceIds: ["seed0"], marketDate: MARKET_DATE }, { marketMultiplierPpm: BASE_MARKET });
+    expect(r.ok ? "OK" : r.error.code).toBe("MARKET_UNAVAILABLE"); // 伺服器沒有提供市場日
+    for (const marketDate of [undefined, "", "2026-13-01", "2026-02-30", "2026/11/16", 20261116]) {
+      expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"], ...(marketDate === undefined ? {} : { marketDate }) })).toBe("INVALID_REQUEST");
+    }
+    expect(errCode(s, { type: "sell_artifacts", instanceIds: ["seed0"], marketDate: MARKET_DATE, multiplierPpm: 1_300_000 })).toBe("INVALID_REQUEST"); // 不能提交倍率
   });
 });
 
@@ -231,7 +242,7 @@ describe("領取離線報告（D20）", () => {
       { type: "upgrade_pickaxe", pickaxeId: "pick_stone" },
       { type: "craft", materialId: "iron_ingot", times: 1 },
       { type: "sell_items", itemId: "stone", quantity: 1 },
-      { type: "sell_artifacts", instanceIds: ["d1"] },
+      { type: "sell_artifacts", instanceIds: ["d1"], marketDate: MARKET_DATE },
       { type: "unlock_zone", zone: 1 },
       { type: "select_mining_mode", mode: "frontier" },
     ];

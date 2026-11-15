@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RevealOverlay } from "@/components/game/RevealOverlay";
 import { RuntimeContext } from "@/components/game/runtime-context";
 import { MemoryBackend } from "@/lib/game/dev/memory-backend";
-import { type RevealItem, RevealQueue, SEEN_LIMIT, browserRevealStore, legacyRevealKey, memoryRevealStore, revealNamespace } from "@/lib/game/reveal";
+import { type RevealItem, RevealQueue, SEEN_LIMIT, browserRevealStore, legacyRevealKey, memoryRevealStore, migrateLegacyReveals, revealNamespace } from "@/lib/game/reveal";
 import type { GameRuntime } from "@/lib/game/runtime";
 import { flush, rig } from "./helpers";
 import { findSecret, firstBlockDrops, nearlyDone, toBase64 } from "./support/rig-drops";
@@ -161,6 +161,103 @@ describe("RevealQueue：多分頁交錯讀寫（PR #12 Review P1-1）", () => {
     const other = new RevealQueue(browserRevealStore("u1"));
     other.dismiss("d8");
     expect(q.items()).toEqual([]);
+    localStorage.clear();
+  });
+});
+
+describe("v1 → v2 遷移（PR #12 Review P2）", () => {
+  const V1 = JSON.stringify({ queue: [item(8), item(9, "a_z1_heart")], seen: [{ key: "d2", d: 2 }, { key: "d3", d: 3 }], floor: 1 });
+  /** 可控制失敗的儲存：fail(n) = 接下來第 n 次之後的寫入全部失敗（模擬 QuotaExceeded） */
+  function flaky() {
+    const base = memoryRevealStore();
+    let budget = Infinity;
+    return Object.assign(base, {
+      setBudget: (n: number) => void (budget = n),
+      set: (k: string, v: string) => {
+        if (budget <= 0) return false;
+        budget--;
+        base.data.set(k, v);
+        return true;
+      },
+    });
+  }
+  function legacy(raw: string | null) {
+    const l = { raw, removed: 0, read: () => l.raw, remove: () => void ((l.raw = null), l.removed++) };
+    return l;
+  }
+
+  it("全部寫入成功才刪除 v1；已播放與 floor 都保存；待播放全部保留", () => {
+    const store = flaky();
+    const l = legacy(V1);
+    expect(migrateLegacyReveals(store, l)).toBe("done");
+    expect(l.raw).toBeNull();
+    const q = new RevealQueue(store);
+    expect(q.items().map((i) => i.key)).toEqual(["d8", "d9"]);
+    expect(q.enqueue([item(1), item(2), item(3)])).toBe(0); // floor = 1；d2、d3 已播放
+  });
+
+  it("空間不足（任一寫入失敗）：保留 v1、回傳 retry；騰出空間後重試成功；不重複、不重播", () => {
+    for (let budget = 0; budget < 5; budget++) {
+      const store = flaky();
+      store.setBudget(budget); // 部分寫入成功、之後失敗
+      const l = legacy(V1);
+      expect(migrateLegacyReveals(store, l), `budget ${budget}`).toBe("retry");
+      expect(l.raw).toBe(V1);
+      // 重新整理：玩家在兩次之間看完了 d8（已寫入的部分）
+      store.setBudget(Infinity);
+      const q = new RevealQueue(store);
+      if (q.items().some((i) => i.key === "d8")) q.dismiss("d8");
+      expect(migrateLegacyReveals(store, l)).toBe("done");
+      expect(l.raw).toBeNull();
+      const keys = new RevealQueue(store).items().map((i) => i.key);
+      expect(new Set(keys).size).toBe(keys.length);
+      expect(keys).toContain("d9");
+      if (!keys.includes("d8")) expect(new RevealQueue(store).enqueue([item(8)])).toBe(0);
+      expect(new RevealQueue(store).enqueue([item(2), item(3), item(1)])).toBe(0);
+    }
+  });
+
+  it("重複遷移（刪除 v1 失敗 / 多個分頁同時遷移）：結果相同；遷移後看完的不會回來", () => {
+    const store = flaky();
+    const l = { read: () => V1, remove: () => {
+      throw new Error("remove failed");
+    } };
+    expect(migrateLegacyReveals(store, l)).toBe("retry");
+    const q = new RevealQueue(store);
+    q.dismiss("d8");
+    expect(migrateLegacyReveals(store, l)).toBe("retry");
+    expect(migrateLegacyReveals(store, legacy(V1))).toBe("done");
+    expect(new RevealQueue(store).items().map((i) => i.key)).toEqual(["d9"]);
+  });
+
+  it("損毀資料：整份無法解析 → 保留 v1、不動 v2；個別不合法的項目略過、合法的照常遷移", () => {
+    const store = flaky();
+    new RevealQueue(store).enqueue([item(20)]);
+    const broken = legacy("{not json");
+    expect(migrateLegacyReveals(store, broken)).toBe("corrupt");
+    expect(broken.raw).toBe("{not json");
+    expect(migrateLegacyReveals(store, legacy("[1,2]"))).toBe("corrupt");
+    expect(new RevealQueue(store).items().map((i) => i.key)).toEqual(["d20"]);
+    const mixed = legacy(JSON.stringify({ queue: [item(30), { key: "x", artifactId: "nope" }, null, { ...item(31), artifactId: "a_unknown" }], seen: [null, { key: 5 }], floor: "bad" }));
+    expect(migrateLegacyReveals(store, mixed)).toBe("done");
+    expect(new RevealQueue(store).items().map((i) => i.key)).toEqual(["d20", "d30"]);
+  });
+
+  it("瀏覽器：localStorage QuotaExceeded 時保留 v1，下次啟動（重新整理）重試成功", () => {
+    localStorage.clear();
+    localStorage.setItem(legacyRevealKey("u2"), V1);
+    const original = Storage.prototype.setItem;
+    const spy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, k: string, v: string) {
+      if (k.startsWith(revealNamespace("u2")) && k.endsWith("q:d9")) throw new DOMException("full", "QuotaExceededError");
+      return original.call(this, k, v);
+    });
+    browserRevealStore("u2");
+    expect(localStorage.getItem(legacyRevealKey("u2"))).toBe(V1);
+    spy.mockRestore();
+    const q = new RevealQueue(browserRevealStore("u2"));
+    expect(localStorage.getItem(legacyRevealKey("u2"))).toBeNull();
+    expect(q.items().map((i) => i.key)).toEqual(["d8", "d9"]);
+    expect(q.enqueue([item(2)])).toBe(0);
     localStorage.clear();
   });
 });

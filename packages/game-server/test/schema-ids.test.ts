@@ -1,7 +1,7 @@
 /** SQL 的 ID 清單（check 約束）必須與 @mining/game-data 一致（GBS §24：ID 只能新增，新增 ID 需要新的 migration） */
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { ARTIFACT_IDS, MATERIAL_IDS, MINERAL_IDS, PICKAXE_IDS } from "@mining/game-data";
+import { ARTIFACTS, ARTIFACT_IDS, MARKET_MULTIPLIER_RANGE_PPM, MARKET_STEP_PPM, MATERIAL_IDS, MINERAL_IDS, PICKAXE_IDS } from "@mining/game-data";
 import { describe, expect, it } from "vitest";
 
 const dir = resolve(import.meta.dirname, "../../../supabase/migrations");
@@ -23,5 +23,16 @@ describe("migration 的 ID 清單與 game-data 一致", () => {
   });
   it("十字鎬", () => {
     for (const l of lists("pickaxe_id")) expect(l).toEqual([...PICKAXE_IDS]);
+  });
+  it("市場：寶物稀有度、Min / Max / Step 與 game-data 一致（GBS §13）", () => {
+    const body = /function private\.market_artifacts\(\)[\s\S]*?\$\$;/.exec(sql)![0];
+    const pairs = [...body.matchAll(/\('([a-z0-9_]+)', '(epic|legendary)'\)/g)].map((m) => [m[1], m[2]]);
+    expect(pairs).toEqual(ARTIFACT_IDS.map((id) => [id, ARTIFACTS[id].rarity]));
+    const next = /function private\.market_next_ppm[\s\S]*?\$\$;/.exec(sql)![0];
+    for (const r of ["epic", "legendary"] as const) {
+      expect(next).toContain(`when '${r}' then ${MARKET_STEP_PPM[r]}`);
+      expect(next).toContain(`when '${r}' then ${MARKET_MULTIPLIER_RANGE_PPM[r].min}`);
+      expect(next).toContain(`when '${r}' then ${MARKET_MULTIPLIER_RANGE_PPM[r].max}`);
+    }
   });
 });

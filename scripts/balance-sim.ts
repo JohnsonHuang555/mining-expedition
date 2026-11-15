@@ -339,12 +339,14 @@ function computeRates(spot: Spot, s: Stats): Rates {
 // ---------- 引擎呼叫 ----------
 
 /** 以 Base Value 出售寶物（模擬器不模擬每日市場，GBS §23.2） */
+/** 模擬器不模擬市場日；固定一個日期讓報價檢查通過 */
+const SIM_MARKET_DATE = "2026-01-01";
 const BASE_MARKET = Object.fromEntries(GD.ARTIFACT_IDS.map((id) => [id, 1_000_000])) as Partial<Record<GD.ArtifactId, number>>;
 
 /** 套用一個玩家操作；策略只送出合法的操作，失敗代表模擬器或引擎有錯 */
 function act(p: Player, action: GameAction): void {
   // 模擬器在結算的同一時刻操作（serverNow = lastSettledAt）；領取報告時等待時間為 0（D24）
-  const r = applyAction(p.gs, action, { marketMultiplierPpm: BASE_MARKET, serverNow: p.gs.lastSettledAt });
+  const r = applyAction(p.gs, action, { marketMultiplierPpm: BASE_MARKET, marketDate: SIM_MARKET_DATE, serverNow: p.gs.lastSettledAt });
   if (!r.ok) throw new Error(`sim action ${JSON.stringify(action)} failed: ${r.error.code} ${r.error.message}`);
   for (const e of r.events) {
     if (e.type === "items_sold" || e.type === "artifacts_sold") gain(p, e.coins);
@@ -459,7 +461,7 @@ function sellExcess(p: Player) {
     for (const z of ZONES) for (const id of z.epics) {
       extra.push(...p.gs.heldArtifacts.filter((a) => a.artifactId === id).slice(1).map((a) => a.instanceId));
     }
-    if (extra.length > 0) act(p, { type: "sell_artifacts", instanceIds: extra });
+    if (extra.length > 0) act(p, { type: "sell_artifacts", instanceIds: extra, marketDate: SIM_MARKET_DATE });
   }
 }
 
