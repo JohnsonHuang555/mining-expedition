@@ -5,7 +5,7 @@ import { type BlockPrediction, type PlayerStateView, bandOfBlock, requiredPower1
 import { useState } from "react";
 import { Panel, PixelBar, PixelButton, Stat } from "@/components/ui/pixel";
 import { STATUS_LABEL, artifactName, artifactRarity, bandRange, coins, duration, formatStats, itemName, itemRarity, meters, pickaxeName, spotLabel, zoneName } from "@/lib/game/format";
-import type { LootEntry } from "@/lib/game/store";
+import { type LootEntry, canAct } from "@/lib/game/store";
 import { MiningScene } from "./MiningScene";
 import { useController, useGame, usePrediction } from "./runtime-context";
 
@@ -39,6 +39,7 @@ function TopBar({ email, onSignOut }: { email: string | null; onSignOut(): void 
   const sync = useGame((s) => s.sync);
   const notice = useGame((s) => s.notice);
   const error = useGame((s) => s.error);
+  const pending = useGame((s) => s.pending);
   return (
     <header className="flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -63,6 +64,16 @@ function TopBar({ email, onSignOut }: { email: string | null; onSignOut(): void 
             關閉
           </button>
         </p>
+      )}
+      {pending && (
+        <div className="flex flex-wrap items-center justify-between gap-2 bg-crystal/15 px-3 py-2 text-sm text-crystal" role="status" data-testid="pending-action">
+          <span>
+            {busy === "reconcile" || (busy !== null && busy !== "settle") ? "正在確認上一個操作的結果…" : "上一個操作的結果尚未確認：會以同一筆請求確認，不會重複執行。"}
+          </span>
+          <PixelButton tone="secondary" className="px-3 py-1 text-xs" disabled={busy !== null} onClick={() => void controller.sync()}>
+            重新確認
+          </PixelButton>
+        </div>
       )}
       {error && (
         <p className="bg-danger/15 px-3 py-2 text-sm text-danger" role="alert">
@@ -97,7 +108,7 @@ function PlayerStats({ view }: { view: PlayerStateView }) {
 
 function MiningPanel({ view, prediction }: { view: PlayerStateView; prediction: BlockPrediction | null }) {
   const controller = useController();
-  const busy = useGame((s) => s.busy);
+  const actionable = useGame(canAct);
   const fresh = useGame((s) => s.fresh);
   const s = view.state;
   const status = prediction?.status ?? view.status;
@@ -154,7 +165,7 @@ function MiningPanel({ view, prediction }: { view: PlayerStateView; prediction: 
         <Hint tone="ember" testId="hint-unlock">
           已挖到 {zoneName(s.unlockedZone)} 底部。解鎖「{zoneName(nextZone)}」需要 {coins(fee)} 金幣。
           <div className="mt-2">
-            <PixelButton className="px-3 py-1.5 text-xs" disabled={busy !== null || s.coins < fee} onClick={() => void controller.unlockZone(nextZone)}>
+            <PixelButton className="px-3 py-1.5 text-xs" disabled={!actionable || s.coins < fee} onClick={() => void controller.unlockZone(nextZone)}>
               {s.coins < fee ? `金幣不足（${coins(s.coins)} / ${coins(fee)}）` : `解鎖 ${zoneName(nextZone)}`}
             </PixelButton>
           </div>
@@ -181,13 +192,13 @@ function Hint({ children, tone, testId }: { children: React.ReactNode; tone: "da
 
 function ModePanel({ view }: { view: PlayerStateView }) {
   const controller = useController();
-  const busy = useGame((s) => s.busy);
+  const actionable = useGame(canAct);
   const [zone, setZone] = useState<ZoneIndex | null>(null);
   const s = view.state;
   const m = s.mining;
   const zones = revisitableZones(m.frontierBlockIndex, s.unlockedZone);
   const rework = reworkBand(m.frontierBlockIndex, s.unlockedZone, view.stats.power10);
-  const disabled = busy !== null;
+  const disabled = !actionable;
   const pickZone = zone ?? zones[zones.length - 1] ?? null;
 
   return (

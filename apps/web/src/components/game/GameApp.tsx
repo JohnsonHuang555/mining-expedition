@@ -1,14 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useAuth } from "@/lib/auth/auth-provider";
-import { disposeGameRuntime, gameRuntime } from "@/lib/game/runtime";
+import { disposeAllRuntimes } from "@/lib/game/runtime";
 import { Panel, PixelButton } from "@/components/ui/pixel";
 import { CreateCharacter } from "./CreateCharacter";
 import { Dashboard } from "./Dashboard";
 import { OfflineReportModal } from "./OfflineReportModal";
 import { RuntimeContext, useController, useGame } from "./runtime-context";
+import { useGameRuntime } from "./use-game-runtime";
 
 /** 登入狀態 → 遊戲狀態的進入點。未登入一律導向 /login。 */
 export function GameApp() {
@@ -17,27 +18,20 @@ export function GameApp() {
   const expired = useRef(false);
 
   useEffect(() => {
-    if (auth.status === "signed_out") {
-      disposeGameRuntime();
-      router.replace(expired.current ? "/login?expired=1" : "/login");
-    }
+    if (auth.status === "signed_out") router.replace(expired.current ? "/login?expired=1" : "/login");
   }, [auth.status, router]);
 
-  const runtime = useMemo(
-    () =>
-      auth.status === "signed_in" && auth.userId
-        ? gameRuntime(auth.userId, () => {
-            expired.current = true; // token 更新失敗：登入已過期
-          })
-        : null,
-    [auth.status, auth.userId],
-  );
+  // token 更新失敗：登入已過期（導向時顯示提示）
+  const onSignedOut = useCallback(() => {
+    expired.current = true;
+  }, []);
+  const runtime = useGameRuntime(auth.status === "signed_in" ? auth.userId : null, onSignedOut);
 
   if (auth.status === "unconfigured") return <Splash text="尚未設定 Supabase（NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY）" />;
   if (auth.status !== "signed_in" || !runtime) return <Splash text="載入中…" />;
 
   const signOut = async () => {
-    disposeGameRuntime();
+    disposeAllRuntimes();
     await auth.signOut();
   };
 
@@ -48,7 +42,7 @@ export function GameApp() {
   );
 }
 
-function GameScreens({ email, onSignOut }: { email: string | null; onSignOut(): void }) {
+export function GameScreens({ email, onSignOut }: { email: string | null; onSignOut(): void }) {
   const controller = useController();
   const phase = useGame((s) => s.phase);
   const view = useGame((s) => s.view);

@@ -11,6 +11,7 @@
 
 import type { GameCommand } from "@mining/game-engine";
 import type { ApiErrorCode, ApiResponse } from "@mining/game-server";
+import { apiResponseIssue } from "./validate";
 
 export type OkResponse = Extract<ApiResponse, { ok: true }>;
 export type ErrResponse = Extract<ApiResponse, { ok: false }>;
@@ -75,15 +76,23 @@ export function createGameApi(opts: GameApiOptions): GameApi {
     } catch {
       return { ok: false, status: null, code: "NETWORK", message: "network error", body: null };
     }
-    let parsed: ApiResponse | null = null;
+    let raw: unknown = null;
     try {
-      parsed = (await res.json()) as ApiResponse;
+      raw = await res.json();
     } catch {
-      parsed = null;
+      raw = null;
     }
     if (res.status === 401) return { ok: false, status: 401, code: "UNAUTHORIZED", message: "sign in required", body: null };
-    if (!parsed || typeof parsed !== "object" || typeof parsed.ok !== "boolean") {
-      return { ok: false, status: res.status, code: RETRYABLE_STATUS.has(res.status) ? "SERVER_BUSY" : "BAD_RESPONSE", message: `unexpected response (${res.status})`, body: null };
+    // 寫入 store 前驗證結構：不合法 → BAD_RESPONSE（結果不確定，交由呼叫端重試 / 調和），不讓畫面解構 undefined
+    const issue = apiResponseIssue(raw);
+    if (issue !== null) {
+      if (RETRYABLE_STATUS.has(res.status)) return { ok: false, status: res.status, code: "SERVER_BUSY", message: `unexpected response (${res.status})`, body: null };
+      return { ok: false, status: res.status, code: "BAD_RESPONSE", message: `invalid response: ${issue}`, body: null };
+    }
+    const parsed = raw as ApiResponse;
+    // 成功狀態碼與 ok 必須一致（例如 200 + ok:false 或 4xx + ok:true 都視為不合法）
+    if (parsed.ok !== (res.status >= 200 && res.status < 300)) {
+      return { ok: false, status: res.status, code: "BAD_RESPONSE", message: `status ${res.status} does not match ok=${parsed.ok}`, body: null };
     }
     if (parsed.ok) return { ok: true, status: res.status, body: parsed, replayed: res.headers.get("Idempotent-Replayed") === "true" };
     return { ok: false, status: res.status, code: parsed.error.code, message: parsed.error.message, body: parsed };
