@@ -13,7 +13,7 @@
 import { getSupabase, publicSupabaseEnv } from "../auth/supabase";
 import { type GameApi, createGameApi } from "./api";
 import { GameController } from "./controller";
-import { browserPendingStore } from "./pending";
+import { browserActionLock, browserPendingStore } from "./pending";
 import { type GameStore, createGameStore } from "./store";
 
 export interface GameRuntime {
@@ -38,6 +38,9 @@ export const browserRuntimeFactory: RuntimeFactory = (userId, onSignedOut) => {
   const supabase = getSupabase();
   const env = publicSupabaseEnv();
   if (!supabase || !env) return null;
+  // eslint-disable-next-line prefer-const
+  let controller: GameController;
+  const ownsSession = async () => (await supabase.auth.getSession()).data.session?.user.id === userId;
   const api = createGameApi({
     functionsUrl: `${env.url}/functions/v1`,
     anonKey: env.anonKey,
@@ -47,17 +50,24 @@ export const browserRuntimeFactory: RuntimeFactory = (userId, onSignedOut) => {
       // 換帳號後舊 runtime 的請求不得帶著新使用者的 token 送出
       return s && s.user.id === userId ? s.access_token : null;
     },
+    // 共用的 Supabase client 可能已經換成另一位使用者：只在目前 session 仍屬於這個 runtime 的使用者時才更新 / 登出，
+    // 舊帳號晚到的 401 不得更新、登出或清除新帳號的 session
     refreshAccessToken: async () => {
+      if (!(await ownsSession())) return null;
       const { data, error } = await supabase.auth.refreshSession();
       return error || data.session?.user.id !== userId ? null : (data.session?.access_token ?? null);
     },
-    onUnauthorized: () => void supabase.auth.signOut({ scope: "local" }),
+    onUnauthorized: async () => {
+      if (controller.isDisposed || !(await ownsSession())) return;
+      await supabase.auth.signOut({ scope: "local" });
+    },
   });
   const store = createGameStore();
-  const controller = new GameController({
+  controller = new GameController({
     api,
     store,
     pendingStore: browserPendingStore(userId),
+    actionLock: browserActionLock(userId),
     onSignedOut,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
   });

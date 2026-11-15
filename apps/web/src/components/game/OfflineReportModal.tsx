@@ -22,7 +22,9 @@ export function OfflineReportModal({ report }: { report: OfflineReport }) {
   const controller = useController();
   const busy = useGame((s) => s.busy);
   const sync = useGame((s) => s.sync);
-  const claiming = busy === "claim";
+  const pending = useGame((s) => s.pending);
+  const claiming = busy === "claim" || busy === "reconcile";
+  const uncertain = pending?.command.type === "claim_report" && pending.command.reportId === report.reportId;
   const items = Object.entries(report.rewards.items).filter(([, q]) => (q ?? 0) > 0) as [ItemId, number][];
   const common = items.filter(([id]) => itemRarity(id) === "common");
   const rare = items.filter(([id]) => itemRarity(id) === "rare");
@@ -117,13 +119,18 @@ export function OfflineReportModal({ report }: { report: OfflineReport }) {
         )}
 
         <p className="mt-4 text-xs text-parchment-dim">領取後才會繼續挖掘；等待領取的時間不計入挖掘時間。</p>
+        {uncertain && !claiming && (
+          <p role="status" className="mt-2 text-xs text-crystal" data-testid="claim-uncertain">
+            領取結果尚未確認：恢復連線後會以同一筆請求自動確認，不會重複入帳。
+          </p>
+        )}
         {!sync.ok && sync.message && (
           <p role="alert" className="mt-2 text-xs text-danger">
             {sync.message}
           </p>
         )}
         <PixelButton className="mt-4 w-full py-3 text-base" onClick={() => void controller.claimReport()} disabled={claiming || busy !== null} aria-busy={claiming}>
-          {claiming ? "領取中…" : "領取探險成果"}
+          {claiming ? "領取中…" : uncertain ? "重新確認領取" : "領取探險成果"}
         </PixelButton>
       </div>
     </div>

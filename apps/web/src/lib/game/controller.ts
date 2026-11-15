@@ -21,7 +21,7 @@
 import type { MiningMode } from "@mining/game-data";
 import { type GameCommand, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
 import { type ApiResult, type GameApi, newRequestId } from "./api";
-import { type PendingAction, type PendingStore, memoryPendingStore, sameCommand } from "./pending";
+import { type ActionLock, LOCK_TIMEOUT, type PendingAction, type PendingStore, memoryActionLock, memoryPendingStore, sameCommand } from "./pending";
 import { type BusyOp, type GameStore, type GameUiState, initialUiState, lootFromEvents, mergeLoot } from "./store";
 
 export const HEARTBEAT_MS = 20_000;
@@ -48,6 +48,8 @@ export interface ControllerOptions {
   channel?: SyncChannel | null;
   /** 這位使用者的未確認操作保存處（預設：只在記憶體） */
   pendingStore?: PendingStore;
+  /** 同一位使用者的交易在分頁之間排隊（Web Locks）；預設只在分頁內 */
+  actionLock?: ActionLock;
   /** 登入失效（token 更新失敗）：導向登入頁 */
   onSignedOut?(): void;
   /** 分頁是否在前景 */
@@ -100,7 +102,8 @@ const MESSAGES: Partial<Record<string, string>> = {
   MAX_LEVEL: "已達最高等級",
   INVALID_REQUEST: "操作內容不正確",
   UNCERTAIN: "網路不穩，操作結果尚未確認；恢復連線後會以同一筆請求自動確認（不會重複扣款）",
-  PENDING_OTHER: "上一個操作的結果尚未確認，確認後才能進行其他操作",
+  PENDING_OTHER: "上一個操作（可能在其他分頁）的結果尚未確認，確認後才能進行其他操作",
+  LOCKED: "其他分頁正在進行交易，請稍後再試",
 };
 export const messageFor = (code: string, fallback?: string) => MESSAGES[code] ?? fallback ?? "操作失敗";
 
@@ -127,6 +130,8 @@ export class GameController {
   private readonly clock: Clock;
   private readonly channel: SyncChannel | null;
   private readonly pendingStore: PendingStore;
+  private readonly lock: ActionLock;
+  private unsubscribePending: (() => void) | null = null;
   private readonly opts: ControllerOptions;
   private op: Promise<unknown> | null = null;
   private timer: unknown = null;
@@ -143,9 +148,13 @@ export class GameController {
     this.clock = opts.clock ?? browserClock;
     this.channel = opts.channel === undefined ? browserChannel() : opts.channel;
     this.pendingStore = opts.pendingStore ?? memoryPendingStore();
-    // 重新整理前未確認的操作：恢復，bootstrap 時調和
-    const restored = this.pendingStore.load();
-    if (restored) this.set({ pending: restored });
+    this.lock = opts.actionLock ?? memoryActionLock();
+    // 重新整理前（或其他分頁）未確認的操作：顯示，bootstrap / 下一次同步時調和
+    this.refreshPending();
+    this.unsubscribePending = this.pendingStore.subscribe?.(() => {
+      this.refreshPending();
+      if (this.state.pendingCount > 0) this.schedule();
+    }) ?? null;
   }
 
   get state(): GameUiState {
@@ -185,6 +194,8 @@ export class GameController {
     this.clearTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.unsubscribePending?.();
+    this.unsubscribePending = null;
     this.channel?.close();
   }
 
@@ -200,10 +211,7 @@ export class GameController {
       }
       this.applyView(r, false);
       this.set({ phase: "ready" });
-      if (this.state.pending) {
-        const o = await this.send(this.state.pending);
-        if (o === "uncertain") return;
-      }
+      if (this.pendingStore.list().length > 0 && (await this.reconcileAll()) !== "ok") return;
       if (!this.state.view?.state.pendingOfflineReport) await this.doSettle();
     }).catch(() => {
       this.booted = null; // 失敗時允許重新開始
@@ -248,12 +256,10 @@ export class GameController {
     if (this.disposed) return Promise.resolve();
     if (this.op) return this.op.then(() => undefined); // 合併到進行中的操作
     if (this.state.phase !== "ready") return Promise.resolve();
-    const pending = this.state.pending;
-    return this.exclusive(pending ? "reconcile" : "settle", async () => {
-      if (pending) {
-        const o = await this.send(pending);
-        if (o === "uncertain" || this.state.view?.state.pendingOfflineReport) return;
-      }
+    const reconcile = this.pendingStore.list().length > 0;
+    return this.exclusive(reconcile ? "reconcile" : "settle", async () => {
+      if (reconcile && (await this.reconcileAll()) !== "ok") return;
+      if (this.state.view?.state.pendingOfflineReport) return; // D24：待領報告期間不結算
       await this.doSettle();
     }).then(() => this.schedule());
   }
@@ -266,20 +272,53 @@ export class GameController {
   perform(command: GameCommand): Promise<ActionOutcome> {
     if (this.disposed || command.type === "settle") return Promise.resolve("blocked");
     if (this.op) return Promise.resolve("blocked");
-    const pending = this.state.pending;
-    if (pending && !sameCommand(pending.command, command)) {
-      this.set({ notice: messageFor("PENDING_OTHER") });
-      return Promise.resolve("blocked");
-    }
     if (command.type !== "claim_report" && this.state.view?.state.pendingOfflineReport) {
       this.set({ notice: messageFor("REPORT_PENDING") });
       return Promise.resolve("blocked");
     }
-    const action: PendingAction = pending ?? { requestId: newRequestId(), command, createdAt: Date.now() };
-    return this.exclusive(OP_OF[command.type], () => this.send(action)).then((o) => {
+    return this.exclusive(OP_OF[command.type], async (): Promise<ActionOutcome> => {
+      // 跨分頁排隊；拿到鎖後重新讀取 storage（其他分頁可能剛新增或確認了操作）
+      const r = await this.lock.run(async (): Promise<ActionOutcome> => {
+        if (this.disposed) return "blocked";
+        const list = this.pendingStore.list();
+        const same = list.find((p) => sameCommand(p.command, command));
+        // 先調和其他未確認的操作（可能來自其他分頁）；任何一筆仍不確定就不開始新的交易
+        for (const p of list) {
+          if (p === same) continue;
+          const o = await this.send(p);
+          if (o === "uncertain") {
+            this.set({ notice: messageFor("PENDING_OTHER") });
+            return "blocked";
+          }
+          if (this.disposed) return "blocked";
+        }
+        if (command.type !== "claim_report" && this.state.view?.state.pendingOfflineReport) {
+          this.set({ notice: messageFor("REPORT_PENDING") });
+          return "blocked";
+        }
+        return this.send(same ?? { requestId: newRequestId(), command, createdAt: Date.now() });
+      });
+      if (r === LOCK_TIMEOUT) {
+        this.set({ notice: messageFor("LOCKED") });
+        return "blocked";
+      }
+      return r;
+    }).then((o) => {
       this.schedule();
       return o;
     });
+  }
+
+  /** 以同一個 requestId 重送所有未確認操作（在交易鎖內）；全部得到確定結果時回傳 ok */
+  private async reconcileAll(): Promise<"ok" | "uncertain" | "locked"> {
+    const r = await this.lock.run(async () => {
+      for (const p of this.pendingStore.list()) {
+        if (this.disposed) return "uncertain" as const;
+        if ((await this.send(p)) === "uncertain") return "uncertain" as const;
+      }
+      return "ok" as const;
+    });
+    return r === LOCK_TIMEOUT ? "locked" : r;
   }
 
   claimReport(): Promise<boolean> {
@@ -303,22 +342,28 @@ export class GameController {
 
   // ---------------------------------------------------------------- 內部
 
-  private setPending(p: PendingAction | null): void {
-    if (this.disposed) return;
-    this.pendingStore.save(p);
-    this.set({ pending: p });
+  private refreshPending(): void {
+    const list = this.pendingStore.list();
+    this.set({ pending: list[0] ?? null, pendingCount: list.length });
   }
 
   /** 以 action.requestId 送出（或重送）；依結果決定是否清除未確認操作 */
   private async send(action: PendingAction): Promise<ActionOutcome> {
-    this.setPending(action);
+    if (this.disposed) return "uncertain";
+    this.pendingStore.put(action); // 每筆操作自己的紀錄：不會覆蓋其他分頁的未確認交易
+    this.refreshPending();
+    const before = this.state.view?.state.stateVersion ?? -1;
     const r = await this.api.action(action.command, action.requestId);
     if (this.disposed) return "uncertain"; // 已登出 / 換帳號：不寫入任何畫面狀態；未確認操作留在該使用者的 storage
-    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = []) =>
-      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, events, at: Date.now() } });
+    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = [], synced = false) =>
+      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, synced, events, at: Date.now() } });
+    const resolved = () => {
+      this.pendingStore.remove(action.requestId);
+      this.refreshPending();
+    };
 
     if (r.ok) {
-      this.setPending(null);
+      resolved();
       this.applyOk(r);
       // 只保留這個操作本身的事件（不含操作前的在線結算方塊）
       result("ok", null, r.body.events.filter((e) => e.type !== "block_completed" && e.type !== "mining_stopped"));
@@ -334,9 +379,11 @@ export class GameController {
       result("uncertain", messageFor("UNCERTAIN"));
       return "uncertain";
     }
-    // 伺服器確定的拒絕（已保存在 action_log 的回應）：沒有任何變更，可以清除
-    this.setPending(null);
-    result("rejected", messageFor(r.code, r.message));
+    // 伺服器確定的拒絕（已保存在 action_log 的回應）：交易本身沒有執行，可以清除。
+    // 但操作前的結算可能已經提交（stateVersion 前進）：挖掘進度 / 在線獎勵 / 離線報告仍可能已同步
+    resolved();
+    const synced = r.body?.stateVersion !== undefined && r.body.stateVersion > before;
+    result("rejected", messageFor(r.code, r.message), [], synced);
     if (r.code === "REPORT_ALREADY_CLAIMED" || r.code === "REPORT_NOT_FOUND") {
       this.set({ notice: messageFor("REPORT_ALREADY_CLAIMED") });
       await this.doRefresh();
@@ -458,9 +505,11 @@ export class GameController {
     // 第一次載入因網路失敗：退避後自動重新載入
     if (s.phase === "error" && !s.sync.ok) return Math.min(MAX_BACKOFF_MS, 5_000 * 2 ** Math.max(0, s.sync.failures - 1));
     if (s.phase !== "ready" || !s.view) return null;
+    const backoff = Math.min(MAX_BACKOFF_MS, 5_000 * 2 ** Math.max(0, s.sync.failures - 1));
+    // 未確認操作（包含待領報告的領取）優先：即使有待領報告也要排程調和，否則已提交但回應遺失的領取會一直卡住
+    if (s.pendingCount > 0) return s.sync.ok ? 5_000 : backoff;
     if (s.view.state.pendingOfflineReport) return null; // D24：暫停；等玩家領取
-    if (!s.sync.ok) return Math.min(MAX_BACKOFF_MS, 5_000 * 2 ** Math.max(0, s.sync.failures - 1));
-    if (s.pending) return 5_000; // 未確認操作：盡快調和
+    if (!s.sync.ok) return backoff;
     const sinceSync = this.clock.now() - this.lastSyncAt;
     let target = HEARTBEAT_MS;
     if (s.fresh) {

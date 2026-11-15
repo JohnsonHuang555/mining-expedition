@@ -26,7 +26,7 @@ describe("未確認操作（Idempotency-Key 持續保存）", () => {
     expect(await r.controller.perform(BUY)).toBe("uncertain");
     const pending = r.store.getState().pending!;
     expect(pending.command).toEqual(BUY);
-    expect(r.pendingStore.load()).toEqual(pending);
+    expect(r.pendingStore.list()).toEqual([pending]);
     expect(r.backend.state(r.userId)!.pickaxes.pick_stone).toBe(1); // 伺服器其實已提交
     expect(r.store.getState().view!.state.pickaxes.pick_stone).toBeUndefined(); // 畫面不假設成功
 
@@ -39,19 +39,25 @@ describe("未確認操作（Idempotency-Key 持續保存）", () => {
     expect(r.store.getState().view!.state.coins).toBe(s.coins);
     expect(coins - s.coins).toBeGreaterThan(0);
     expect(r.store.getState().pending).toBeNull();
-    expect(r.pendingStore.load()).toBeNull();
+    expect(r.pendingStore.list()).toEqual([]);
     expect(r.store.getState().lastAction).toMatchObject({ outcome: "ok", command: "purchase_pickaxe" });
   });
 
-  it("未確認期間，其他操作不會送出（避免在結果未知時疊加新交易）", async () => {
+  it("未確認期間的其他操作：先以原 Request ID 調和；仍不確定就不送出新交易", async () => {
     const r = await richPlayer();
     r.backend.faults.push("network", "network", "network", "network");
     expect(await r.controller.perform(BUY)).toBe("uncertain");
-    const n = r.backend.requests.length;
+    const key = r.store.getState().pending!.requestId;
+    r.backend.faults.push("network", "network", "network", "network"); // 調和時仍然斷線
     expect(await r.controller.perform({ type: "sell_items", itemId: "stone", quantity: 1 })).toBe("blocked");
-    expect(await r.controller.selectMode("rework")).toBe(false);
-    expect(r.backend.requests.length).toBe(n);
+    const sent = r.backend.requests.filter((x) => x.fn === "game-action");
+    expect(sent.some((x) => JSON.stringify(x.body).includes("sell_items"))).toBe(false);
+    expect(new Set(purchases(r).map((x) => x.key))).toEqual(new Set([key]));
     expect(r.store.getState().notice).toContain("尚未確認");
+    // 網路恢復：下一個操作先確認購買，再執行出售
+    expect(await r.controller.perform({ type: "sell_items", itemId: "stone", quantity: 1 })).toBe("ok");
+    expect(r.backend.state(r.userId)!.pickaxes.pick_stone).toBe(1);
+    expect(r.store.getState().pendingCount).toBe(0);
   });
 
   it("自動同步先以同一個 Request ID 調和未確認操作，再結算", async () => {
@@ -75,7 +81,7 @@ describe("未確認操作（Idempotency-Key 持續保存）", () => {
     const coinsAfterCommit = backend.state(a.userId)!.coins;
 
     const b = rig({ backend, userId: a.userId, pendingStore: storage });
-    expect(b.store.getState().pending).toEqual(storage.value);
+    expect(b.store.getState().pending).toEqual(storage.list()[0]);
     b.controller.start();
     await b.controller.bootstrap();
     expect(b.store.getState().pending).toBeNull();
