@@ -135,14 +135,14 @@ test("多分頁：一個分頁領取報告後，另一個分頁也更新", async
   await a.reload();
   const b = await context.newPage();
   await b.goto("/");
-  await expect(a.getByRole("dialog")).toBeVisible();
-  await expect(b.getByRole("dialog")).toBeVisible();
+  await expect(a.getByRole("dialog", { name: "⛏ 探險報告" })).toBeVisible();
+  await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeVisible();
   await a.getByRole("button", { name: "領取探險成果" }).click();
-  await expect(a.getByRole("dialog")).toBeHidden();
+  await expect(a.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden();
   // 另一個分頁：收到通知後重新讀取，或按領取時得到「已領取」並恢復
-  await expect(b.getByRole("dialog")).toBeHidden({ timeout: 10_000 }).catch(async () => {
+  await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden({ timeout: 10_000 }).catch(async () => {
     await b.getByRole("button", { name: "領取探險成果" }).click();
-    await expect(b.getByRole("dialog")).toBeHidden();
+    await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden();
   });
   await expect(b.getByTestId("coins")).toHaveText((await a.getByTestId("coins").textContent())!);
 });

@@ -34,7 +34,7 @@ test("經濟循環：挖礦 → 出售 → 購買 → 製作 → 強化 → 裝�
   await pool.query(`update public.players set created_at_ms = created_at_ms - $2, last_settled_at_ms = last_settled_at_ms - $2 where id = $1`, [id, 3 * HOUR]);
   await page.reload();
   await page.getByRole("button", { name: "領取探險成果" }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden();
   await closeReveals(page);
 
   // 3. 背包：出售礦物取得金幣（切換頁面不重新登入、不重建狀態）
