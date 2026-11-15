@@ -40,6 +40,15 @@ async function api(fn: string, token: string | null, opts: { method?: string; ke
   }
   return { status: res.status, headers: res.headers, body };
 }
+/** Supabase Local 的 Edge Runtime 在負載下偶爾回傳沒有內容的 503（不是遊戲 API 的回應）；只對唯讀請求重試這種情況 */
+const gatewayFlake = (c: Call) => c.status >= 502 && c.status <= 504 && !(c.body && typeof c.body === "object" && "error" in c.body);
+async function readOnce(token: string): Promise<Call> {
+  for (let i = 0; ; i++) {
+    const r = await api("game-state", token, { method: "GET" });
+    if (!gatewayFlake(r) || i >= 3) return r;
+    await new Promise((x) => setTimeout(x, 300));
+  }
+}
 const act = (token: string, command: Record<string, unknown>, key = randomUUID(), expire = false) => api("game-action", token, { key, body: { command }, expire });
 
 async function newPlayer() {
@@ -81,7 +90,7 @@ describe("Rate limit（伺服器端）", () => {
     // game-state 上限 20 / 10 秒：連續 41 次必定有一個視窗超過
     let limited: Call | null = null;
     for (let i = 0; i < 41 && !limited; i++) {
-      const r = await api("game-state", p.token, { method: "GET" });
+      const r = await readOnce(p.token);
       if (r.status === 429) limited = r;
       else expect(r.status).toBe(200);
     }
@@ -95,7 +104,7 @@ describe("Rate limit（伺服器端）", () => {
     expect(replay.status).toBe(200);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
     await new Promise((r) => setTimeout(r, retryAfter * 1000 + 200));
-    expect((await api("game-state", p.token, { method: "GET" })).status).toBe(200);
+    expect((await readOnce(p.token)).status).toBe(200);
   });
 });
 
