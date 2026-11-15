@@ -10,21 +10,18 @@ import { createClient } from "@supabase/supabase-js";
 import { type ApiResponse, type GameDb, GameDbError, type HandleResult, type RateLimit, httpStatus, parseRateLimit, supabaseGameDb } from "@mining/game-server";
 import { engineInfo } from "@mining/game-engine";
 import { readJsonBody } from "./body.ts";
+import { corsHeaders, parseAllowedOrigins } from "./cors.ts";
 
 const diagnostics = Deno.env.get("EDGE_DIAGNOSTICS") === "true";
 export const MAX_BODY_BYTES = 16 * 1024;
 
-const CORS = {
-  "Access-Control-Allow-Origin": Deno.env.get("GAME_API_ALLOWED_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, idempotency-key, idempotency-expire, x-client-info",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Expose-Headers": "idempotent-replayed, x-engine-version, server-timing, retry-after",
-};
+/** CORS 允許清單（GAME_API_ALLOWED_ORIGIN，逗號分隔；見 cors.ts）。每個回應依請求的 Origin 加上標頭 */
+const ALLOWED_ORIGINS = parseAllowedOrigins(Deno.env.get("GAME_API_ALLOWED_ORIGIN"));
 
 export function json(body: unknown, status: number, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Engine-Version": engineInfo().engineVersion, ...CORS, ...headers },
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Engine-Version": engineInfo().engineVersion, ...headers },
   });
 }
 
@@ -161,14 +158,19 @@ export async function readJson(req: Request): Promise<Record<string, unknown> | 
 /** 共通的請求包裝：CORS preflight、方法檢查、未預期錯誤遮蔽 */
 export function serve(methods: string[], handler: (req: Request, timing: Timing) => Promise<Response>): void {
   Deno.serve(async (req) => {
-    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-    if (!methods.includes(req.method)) return errorResponse(405, "INVALID_REQUEST", "method not allowed");
+    const cors = corsHeaders(ALLOWED_ORIGINS, req.headers.get("Origin"));
+    const withCors = (res: Response): Response => {
+      for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
+      return res;
+    };
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (!methods.includes(req.method)) return withCors(errorResponse(405, "INVALID_REQUEST", "method not allowed"));
     const timing = newTiming();
     try {
-      return await handler(req, timing);
+      return withCors(await handler(req, timing));
     } catch (e) {
       log("unhandled_error", { error: e instanceof Error ? e.message : String(e) });
-      return errorResponse(500, "INTERNAL_ERROR", "internal error");
+      return withCors(errorResponse(500, "INTERNAL_ERROR", "internal error"));
     }
   });
 }
