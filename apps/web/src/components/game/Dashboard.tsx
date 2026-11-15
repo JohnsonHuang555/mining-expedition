@@ -373,13 +373,14 @@ const NAV: readonly { href: string | null; label: string; sub: string }[] = [
   { href: "/inventory", label: "Inventory", sub: "背包" },
   { href: "/workshop", label: "Workshop", sub: "工坊" },
   { href: "/collection", label: "Collection", sub: "圖鑑" },
+  { href: "/market", label: "Market", sub: "市場" },
 ];
 
 function BottomNav() {
   const pathname = usePathname() ?? "/";
   return (
     <nav className="fixed inset-x-0 bottom-0 z-10 border-t-4 border-cave-600 bg-cave-900/95 backdrop-blur" aria-label="主要功能">
-      <ul className="mx-auto grid max-w-5xl grid-cols-4">
+      <ul className="mx-auto grid max-w-5xl grid-cols-5">
         {NAV.map((t) => {
           const current = t.href !== null && (t.href === "/" ? pathname === "/" : pathname.startsWith(t.href));
           const cls = `flex w-full flex-col items-center py-2 text-xs ${current ? "text-gold" : t.href ? "text-parchment hover:text-gold" : "text-parchment-dim/50"}`;

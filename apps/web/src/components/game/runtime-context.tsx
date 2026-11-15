@@ -22,6 +22,11 @@ export function useController() {
   return useRuntime().controller;
 }
 
+/** 直接讀取目前的 store（事件處理中取得剛寫入的最新值，例如 perform 之後的 lastAction） */
+export function useGameStore() {
+  return useRuntime().store;
+}
+
 const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
 /**

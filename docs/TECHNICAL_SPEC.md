@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.15 | Market UI & Artifact Trading：新增 §12.14 市場畫面（`/market`）、出售流程、套組失效預測、跨日報價重新確認、價格無法取得時的處理；§12.10 寶物出售 UI 開放。**定價演算法、倍率、基礎價值、套組加成、結算不變** |
 | v1.14 | Market Backend & Daily Pricing：§6.3 市場亂數改為資料庫內密鑰（`private.market_secret`）與確定的整數演算法；§8.2 / §8.3 市場資料表、只新增、權限；§9 改為已實作（延遲生成 + pg_cron、並行、失敗處理、報價與成交價）；§10 回應加 `market`、`sell_artifacts` 必須帶 `marketDate`、新錯誤碼 `MARKET_QUOTE_EXPIRED` / `MARKET_UNAVAILABLE`；§12.10 寶物出售後端開放（UI 在 PR #14）。**倍率範圍、Step、均值回歸、基礎價值、掉落、RNG_VERSION 不變** |
 | v1.13 | Artifact Reveal：§12.5 改為已實作的揭曉系統（佇列、去重、在線 / 離線資料流）；§12.13 套組旗標改為 `allDiscovered`（圖鑑已發現全部成員）、確認未發現寶物的揭露規則。**遊戲規則、掉落、首次保護、結算與 RNG_VERSION 不變** |
 | v1.12 | Collection & Artifact Sets：新增 §12.13 圖鑑與套組畫面（`/collection`）、未發現寶物的揭露規則（待確認）；`browserPendingStore.list()` 先取 key 快照再驗證。**遊戲規則、數值、套組加成與 RNG_VERSION 不變** |
@@ -780,7 +781,7 @@ interface GameUiState {
 |---|---|---|---|
 | 礦物 / 寶石 | 固定 `MINERALS[id].sellPrice × 數量` | 引擎 `sell_items` | ✅ 開放 |
 | 製作素材 | 不可出售（P16） | 引擎拒絕 | 只顯示 |
-| 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入，必要時延遲生成）；指令必須帶報價的 `marketDate`；缺少倍率時 `MARKET_UNAVAILABLE` | 後端 ✅（v1.14）；UI 在 PR #14 |
+| 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入，必要時延遲生成）；指令必須帶報價的 `marketDate`；缺少倍率時 `MARKET_UNAVAILABLE` | ✅（v1.15，`/market`，§12.14） |
 
 ### 12.11 跨分頁交易與失敗模式【v1.11】
 
@@ -839,6 +840,24 @@ interface GameUiState {
 - 多分頁同時結算時由伺服器 CAS（§10.6）處理；同一份報告只會入帳一次，晚到的分頁得到 `REPORT_ALREADY_CLAIMED` 後重新讀取。
 
 ---
+
+
+### 12.14 市場與寶物出售（`/market`）【v1.15】
+
+| 項目 | 規則 |
+|---|---|
+| 資料來源 | 報價只來自伺服器回應的 `market`（store 保存市場日較新的報價）；開啟市場時以唯讀 `game-state` 取得歷史（`controller.refreshMarket()`），本機時間超過 `nextRefreshAt` 時也重新取得。售價用引擎 `artifactSalePrice` 顯示，**不重新實作定價** |
+| 報價狀態 | `valid` / `refreshing`（本機時間已過更新時間，只是顯示）/ `unavailable`（倍率為空：不顯示價格、不能出售，不使用任何備用倍率）/ `none` |
+| 寶物卡 | 圖示、名稱、Epic / Legendary、礦區、基礎價值、今日售價、倍率、持有數、是否屬於生效中的套組。未發現的寶物沿用圖鑑規則：只顯示礦區與稀有度，不顯示名稱、外觀與行情 |
+| 走勢 | 伺服器歷史（最多 6 天 + 今天）畫成 SVG 折線，可展開日期 / 倍率 / 價格表；少於 2 天顯示「尚無歷史行情」。漲跌只在歷史中確實有「昨天」時顯示（不與基礎價比較、不補假資料） |
+| 選擇 | 每種寶物選件數（− / ＋ / 全部），轉成 `heldArtifacts` 中的 instanceId（先賣較新取得的）；件數永遠不超過目前持有；一次最多 `MAX_ARTIFACTS_PER_SALE`（100） |
+| 確認 | 名稱、實際實例 ID、件數、單價 / 倍率、小計與預估總收入、市場日、出售後剩餘；開啟時固定要出售的實例，持有狀態改變（例如其他分頁已出售）時停用確認並提供「重新選擇」 |
+| 套組影響 | 以引擎 `activeSets` 比較出售前後的持有數量：只列出「出售前生效、出售後失效」的套組（例：「出售後將失去老礦工套組效果：Speed ×1.03」），可同時列出多個；有影響時標題、按鈕（「仍要出售」）與警告框都不同。只是預測，結果以伺服器回應為準 |
+| 送出 | `{ type: "sell_artifacts", instanceIds, marketDate }`（畫面上報價的市場日），經由既有的 `controller.perform`（未確認操作、Web Lock、冪等）；不送價格 / 倍率；不做 optimistic update，金幣、持有、套組、能力值只來自伺服器回應；成交金額取自 `artifacts_sold` 事件 |
+| 報價過期 | `MARKET_QUOTE_EXPIRED`：交易沒有執行，未確認紀錄清除；回應附帶的新報價更新畫面，確認視窗以新價格重新計算並顯示「市場價格已更新，請重新確認」；**不自動重送**，玩家再次確認才送出（指令不同 → 新的 Request ID） |
+| 無法取得 | `MARKET_UNAVAILABLE`（不保存 → 確定沒有提交）：顯示「市場價格暫時無法取得」，停用出售；挖礦、同步等其他功能不受影響。網路失敗等「結果未確認」的情況仍走既有的同 Key 調和 |
+| 其他入口 | 背包的寶物區塊（同種合併件數、前往市場）；圖鑑詳細資料的「查看市場行情」（`/market#market-<id>`）。圖鑑紀錄出售後仍保留 |
+| 阻擋 | 有待領報告或未確認操作時不能出售（`canAct`）；共用同一個 runtime，切換頁面不重建 |
 
 ## 13. 存檔與版本
 

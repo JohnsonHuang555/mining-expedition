@@ -172,7 +172,7 @@ describe("ConfirmDialog", () => {
 });
 
 describe("交易提示文字", () => {
-  const base = { requestId: "r", command: "purchase_pickaxe" as const, events: [], at: 0 };
+  const base = { requestId: "r", command: "purchase_pickaxe" as const, events: [], at: 0, code: null };
   it("拒絕：交易未執行；結算已同步時另外說明；未確認：會自動確認", () => {
     expect(describeAction({ ...base, outcome: "rejected", message: "金幣不足", synced: false })).toBe("✗ 金幣不足：此操作未執行，沒有扣除金幣或素材");
     expect(describeAction({ ...base, outcome: "rejected", message: "金幣不足", synced: true })).toBe("✗ 金幣不足：此操作未執行，沒有扣除金幣或素材（挖掘結算已同步）");
