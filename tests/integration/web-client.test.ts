@@ -209,7 +209,9 @@ describe("Web Client × 真實 Supabase Local", () => {
     await b.controller.bootstrap();
     expect(b.store.getState().pending).toBeNull();
     expect(b.store.getState().view!.state.pickaxes).toMatchObject({ pick_wood: 1, pick_stone: 1 });
-    expect((await pool.query(`select coins from public.players where id = $1`, [u.userId])).rows[0].coins).toBe(coinsAfter);
+    // 只扣款一次：之後的變化只來自調和後那一次結算挖到的方塊（CI 較慢時可能剛好完成一個方塊）
+    const mined = (b.store.getState().lastSettlement?.blocks ?? []).reduce((sum, l) => sum + l.coins, 0);
+    expect(Number((await pool.query(`select coins from public.players where id = $1`, [u.userId])).rows[0].coins)).toBe(Number(coinsAfter) + mined);
     const purchases = await pool.query(`select count(*)::int as n from public.action_log where player_id = $1 and command = 'purchase_pickaxe'`, [u.userId]);
     expect(purchases.rows[0].n).toBe(1);
   });
