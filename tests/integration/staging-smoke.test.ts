@@ -129,12 +129,23 @@ describe.skipIf(!enabled)("Cloud Staging smoke（API）", () => {
     expect(injected.status).toBe(400);
   });
 
-  it("CORS：允許的 Staging 網址取得 Access-Control-Allow-Origin；其他網域沒有", async () => {
+  it("CORS：只有 Staging 網址取得 Access-Control-Allow-Origin（fail closed：其他 origin 一律沒有）", async () => {
     const origin = env("STAGING_WEB_ORIGIN");
-    const ok = await fetch(`${functions}/game-state`, { method: "OPTIONS", headers: { Origin: origin, "Access-Control-Request-Method": "GET" } });
-    expect(ok.headers.get("access-control-allow-origin")).toBe(origin);
-    const evil = await fetch(`${functions}/game-state`, { method: "OPTIONS", headers: { Origin: "https://evil.example.com", "Access-Control-Request-Method": "GET" } });
-    expect(evil.headers.get("access-control-allow-origin")).toBeNull();
+    const preflight = (o: string) =>
+      fetch(`${functions}/game-state`, { method: "OPTIONS", headers: { Origin: o, "Access-Control-Request-Method": "GET" } }).then((r) =>
+        r.headers.get("access-control-allow-origin"),
+      );
+    expect(await preflight(origin)).toBe(origin);
+    const host = new URL(origin).host;
+    const denied = [
+      "https://evil.example.com",
+      `http://${host}`, // 非 https
+      `https://${host}.evil.example.com`, // 網域偽裝
+      `https://evil-${host}`,
+      host.endsWith(".vercel.app") ? `https://someone-else-git-staging-other.vercel.app` : "https://other.example.org", // 其他人的 Vercel 網址
+      "null",
+    ];
+    for (const o of denied) expect.soft(await preflight(o), o).toBeNull();
   });
 
   it.skipIf(process.env.SMOKE_RATE_LIMIT !== "1")("Rate limit：唯讀請求超過上限 → 429 + Retry-After；等待後恢復（最多 30 個請求）", async () => {

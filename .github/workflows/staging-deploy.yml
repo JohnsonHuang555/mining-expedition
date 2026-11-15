@@ -6,7 +6,9 @@
 #   Required reviewers（人工批准）與 Deployment branches = main。
 # - 輸入的 project ref 必須與 environment 變數 STAGING_PROJECT_REF 相同，且不得等於 PRODUCTION_PROJECT_REF。
 # - 不執行 db reset；migration 先 dry-run 再套用；任何一步失敗就停止，摘要逐步列出結果（不把部分成功顯示為成功）。
-# - 不部署 Production；Vercel Preview 由 Vercel 的 Git 整合自動建立，不在這裡部署。
+# - 不部署 Production。Web（Vercel）= `staging` 分支的 Preview 部署（Vercel 的 Production Branch 維持 main，且
+#   apps/web/vercel.json 的 Ignored Build Step 略過 main / 其他分支）。這個 workflow 把**已審核的 main commit**
+#   fast-forward 到 `staging` 分支（不允許非 fast-forward），再等待 Vercel 以同一個 commit 完成建置（/api/version）。
 name: Staging deploy
 
 on:
@@ -22,6 +24,10 @@ on:
         default: true
       deploy_functions:
         description: "部署 Edge Functions（character-create、game-state、game-action、health）"
+        type: boolean
+        default: true
+      deploy_web:
+        description: "Web：把這個 main commit fast-forward 到 staging 分支，等待 Vercel Preview 以同一個 commit 建置完成"
         type: boolean
         default: true
       run_smoke:
@@ -47,6 +53,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     environment: staging
+    permissions:
+      contents: write # 只用於把已審核的 main commit fast-forward 到 staging 分支（Environment 批准之後才會執行）
     env:
       STAGING_PROJECT_REF: ${{ vars.STAGING_PROJECT_REF }}
       PRODUCTION_PROJECT_REF: ${{ vars.PRODUCTION_PROJECT_REF }}
@@ -55,6 +63,8 @@ jobs:
       SUPABASE_DB_PASSWORD: ${{ secrets.STAGING_DB_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
@@ -114,6 +124,41 @@ jobs:
         if: inputs.deploy_functions
         run: supabase functions deploy health character-create game-state game-action --project-ref "$STAGING_PROJECT_REF"
 
+      - name: Promote this main commit to the staging branch (fast-forward only)
+        id: promote_web
+        if: inputs.deploy_web
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin staging >/dev/null; then
+            git fetch origin staging
+            if ! git merge-base --is-ancestor origin/staging "$GITHUB_SHA"; then
+              echo "staging is not an ancestor of $GITHUB_SHA (someone pushed to staging directly?) — refusing a non-fast-forward update"; exit 1
+            fi
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/staging"
+          echo "staging -> ${GITHUB_SHA::7}"
+
+      - name: Wait for the Vercel staging build of this commit (/api/version)
+        id: wait_web
+        if: inputs.deploy_web
+        env:
+          STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: |
+          set -uo pipefail
+          test -n "$STAGING_WEB_URL" || { echo "STAGING_WEB_URL is required"; exit 1; }
+          for i in $(seq 1 60); do
+            body=$(curl -fsS -H "x-vercel-protection-bypass: ${VERCEL_AUTOMATION_BYPASS_SECRET:-}" "$STAGING_WEB_URL/api/version" || true)
+            commit=$(printf '%s' "$body" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);console.log(`${j.commit}|${j.env}|${j.ref}`)}catch{console.log("")}})')
+            echo "attempt $i: ${commit:-no response}"
+            if [ "${commit%%|*}" = "$GITHUB_SHA" ]; then
+              [ "$commit" = "$GITHUB_SHA|preview|staging" ] || { echo "unexpected deployment environment: $commit"; exit 1; }
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Vercel did not serve $GITHUB_SHA at $STAGING_WEB_URL within 15 minutes"; exit 1
+
       - name: API smoke test
         id: smoke_api
         if: inputs.run_smoke
@@ -134,6 +179,7 @@ jobs:
         if: inputs.run_smoke
         env:
           STAGING_WEB_URL: ${{ vars.STAGING_WEB_URL }}
+          EXPECTED_COMMIT: ${{ github.sha }}
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
           SMOKE_USER_A_EMAIL: ${{ secrets.SMOKE_USER_A_EMAIL }}
           SMOKE_USER_A_PASSWORD: ${{ secrets.SMOKE_USER_A_PASSWORD }}
@@ -168,6 +214,8 @@ jobs:
             echo "| verify database | ${{ steps.verify.outcome }} |"
             echo "| function secrets | ${{ steps.secrets.outcome }} |"
             echo "| deploy functions | ${{ steps.functions.outcome }} |"
+            echo "| promote web (staging branch) | ${{ steps.promote_web.outcome }} |"
+            echo "| web serves this commit | ${{ steps.wait_web.outcome }} |"
             echo "| API smoke | ${{ steps.smoke_api.outcome }} |"
             echo "| browser smoke | ${{ steps.smoke_web.outcome }} |"
             echo "| ops report | ${{ steps.ops.outcome }} |"

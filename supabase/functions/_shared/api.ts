@@ -10,13 +10,17 @@ import { createClient } from "@supabase/supabase-js";
 import { type ApiResponse, type GameDb, GameDbError, type HandleResult, type RateLimit, httpStatus, parseRateLimit, supabaseGameDb } from "@mining/game-server";
 import { engineInfo } from "@mining/game-engine";
 import { readJsonBody } from "./body.ts";
-import { corsHeaders, parseAllowedOrigins } from "./cors.ts";
+import { corsHeaders, parseAllowedOrigins, requiresExplicitOrigins } from "./cors.ts";
 
 const diagnostics = Deno.env.get("EDGE_DIAGNOSTICS") === "true";
 export const MAX_BODY_BYTES = 16 * 1024;
 
 /** CORS 允許清單（GAME_API_ALLOWED_ORIGIN，逗號分隔；見 cors.ts）。每個回應依請求的 Origin 加上標頭 */
-const ALLOWED_ORIGINS = parseAllowedOrigins(Deno.env.get("GAME_API_ALLOWED_ORIGIN"));
+// Cloud（https 的 SUPABASE_URL）沒有設定時拒絕所有瀏覽器 origin（fail closed）；只有本地允許 `*`
+const ALLOWED_ORIGINS = parseAllowedOrigins(Deno.env.get("GAME_API_ALLOWED_ORIGIN"), requiresExplicitOrigins(Deno.env.get("SUPABASE_URL")));
+if (Array.isArray(ALLOWED_ORIGINS) && ALLOWED_ORIGINS.length === 0) {
+  console.error(JSON.stringify({ event: "cors_not_configured", message: "GAME_API_ALLOWED_ORIGIN is empty: all browser origins are rejected" }));
+}
 
 export function json(body: unknown, status: number, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {

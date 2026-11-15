@@ -22,6 +22,14 @@ async function signIn(page: Page, p: "A" | "B") {
   await expect(status).toBeVisible();
 }
 
+test("部署版本：Staging 網址是 staging 分支的 Preview，且是預期的 commit", async ({ request }) => {
+  const r = await request.get("/api/version");
+  expect(r.ok()).toBe(true);
+  const v = (await r.json()) as { commit: string | null; ref: string | null; env: string };
+  expect(v).toMatchObject({ env: "preview", ref: "staging" });
+  if (process.env.EXPECTED_COMMIT) expect(v.commit).toBe(process.env.EXPECTED_COMMIT);
+});
+
 test("登入 → 挖礦同步 → 重新整理保留 → 市場 / 背包 / 圖鑑 → 登出 → 換帳號不殘留", async ({ page }) => {
   await page.goto("/login");
   // 封閉測試：不顯示公開註冊

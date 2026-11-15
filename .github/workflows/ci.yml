@@ -30,6 +30,8 @@ jobs:
       - run: pnpm test
       - name: Staging deploy guard (project ref checks)
         run: node --test scripts/staging/guard.test.ts
+      - name: Staging config audit (Vercel staging branch, version check, CORS fail closed)
+        run: node --test scripts/staging/config-audit.test.mjs scripts/vercel-ignore-build.test.mjs
       - name: Engine coverage (T11：lines ≥ 90%)
         run: pnpm --filter @mining/game-engine coverage
       - name: Engine determinism (Node vs fixture)

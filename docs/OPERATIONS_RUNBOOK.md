@@ -124,7 +124,7 @@ supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema pu
 
 | 層 | 方式 |
 |---|---|
-| Vercel | Dashboard → Deployments → 選擇上一個成功的 Preview → Promote / Redeploy（Preview 環境以分支為單位） |
+| Web（Vercel） | 在 main 上 revert 有問題的 PR → 重新執行 Staging deploy（`staging` 分支以 fast-forward 前進到 revert commit；Web 與 Edge 同一版本）。**不要**使用 Vercel 的「Promote to Production」（會變成 Production 部署），也不要 force push `staging`。緊急時可在 Vercel 對 `staging` 的上一個部署按 Redeploy，但 `/api/version` 會與 Edge 不一致，之後必須補上 revert + workflow |
 | Edge Functions | 以上一個 commit 重新執行 Staging deploy（只勾選 deploy functions），或本機 `git checkout <commit> && supabase functions deploy ... --project-ref <staging>`（先跑 guard） |
 | 資料庫 | 只能往前修正（新 migration）。PR #15 的壓縮執行後不可回滾到舊版函式（`docs/SECURITY_RELIABILITY.md` §3.5）；必要時先 `select cron.unschedule('action-log-compact');`（會修改） |
 | 資料錯誤 | 從備份還原到隔離專案 → 比對 → 決定修正方式；**不要在 Staging / Production 使用 `supabase db reset`** |
@@ -134,8 +134,10 @@ supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema pu
 | 症狀 | 檢查 | 處理 |
 |---|---|---|
 | Vercel build 找不到 `@mining/*` | Root Directory 是否為 `apps/web`、「Include files outside the root directory」是否開啟 | 開啟後重新部署 |
-| 瀏覽器 CORS 錯誤 | Edge secret `GAME_API_ALLOWED_ORIGIN` 是否包含該 Preview 網址的樣式 | `supabase secrets set` 後重新部署函式 |
-| 登入後立刻被登出 | Auth Logs；Site URL / Redirect URLs | 補上 Preview 網址樣式 |
+| 瀏覽器 CORS 錯誤 | Edge secret `GAME_API_ALLOWED_ORIGIN` 是否等於 `staging` 的 Branch URL origin（Cloud 上沒有設定時會拒絕所有 origin；Edge log 有 `cors_not_configured`） | 更正 GitHub variable `STAGING_ALLOWED_ORIGINS` 後重新執行 workflow |
+| 登入後立刻被登出 | Auth Logs；Site URL / Redirect URLs | 補上 `staging` 的 Branch URL |
+| workflow 卡在「Wait for the Vercel staging build」 | Vercel → Deployments：`staging` 的建置是否失敗、是否被 Ignored Build Step 略過（log 顯示 `skip:`）、`STAGING_WEB_URL` 是否為 Branch URL | 修正後重新執行（只勾選 deploy web） |
+| main 出現 Vercel Production 部署 | `apps/web/vercel.json` 的 `ignoreCommand` 是否被後台覆寫、是否設定了 `MINING_ALLOW_PRODUCTION_BUILD` | 恢復設定；這個 PR 不部署 Production |
 | 註冊顯示「封閉測試」 | 預期行為（`NEXT_PUBLIC_SIGNUP_ENABLED=false` 與 Auth 關閉註冊） | 以 Dashboard 建立 / 邀請帳號 |
 | `verify-staging.sql` 失敗 | 錯誤訊息列出每一項 | 依項目修正（權限 / cron / 索引）；不要手動改 schema，改用 migration |
 | cron job 不存在 | `pg_cron` 是否在 migration 之前啟用 | 啟用後重新套用排程（另開 migration 或依 migration 中的 `cron.schedule` 指令手動建立，並記錄） |

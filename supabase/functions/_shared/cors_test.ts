@@ -2,7 +2,7 @@
 function assertEquals(actual: unknown, expected: unknown, msg = ""): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${msg} expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
 }
-import { corsHeaders, matchOrigin, parseAllowedOrigins } from "./cors.ts";
+import { corsHeaders, matchOrigin, parseAllowedOrigins, requiresExplicitOrigins } from "./cors.ts";
 
 const rules = parseAllowedOrigins("https://staging.example.com, https://mining-expedition-*-johnson.vercel.app, http://localhost:3000");
 
@@ -38,4 +38,15 @@ Deno.test("不允許：其他網域、跨越網域的 *、子網域偽裝、缺�
 Deno.test("過寬或格式錯誤的樣式會被丟棄（不會變成允許全部）", () => {
   assertEquals(parseAllowedOrigins("https://*, https://*.vercel.app, https://foo*.vercel.app, *, https://a*b*c.com, not-a-url"), []);
   assertEquals(matchOrigin(parseAllowedOrigins("https://*.vercel.app"), "https://anyone.vercel.app"), null);
+});
+
+Deno.test("Cloud（https 的 SUPABASE_URL）沒有設定允許清單：拒絕所有瀏覽器 origin（fail closed）", () => {
+  assertEquals(requiresExplicitOrigins("https://abcdefghijklmnopqrst.supabase.co"), true);
+  assertEquals(requiresExplicitOrigins("http://kong:8000"), false);
+  assertEquals(requiresExplicitOrigins(undefined), false);
+  const cloud = parseAllowedOrigins(undefined, true);
+  assertEquals(cloud, []);
+  assertEquals(corsHeaders(cloud, "https://mining-expedition-git-staging-johnson.vercel.app")["Access-Control-Allow-Origin"], undefined);
+  assertEquals(parseAllowedOrigins("", true), []);
+  assertEquals(parseAllowedOrigins(undefined, false), "*"); // 本地維持相容
 });

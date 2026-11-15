@@ -10,7 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
-| v1.17 | Cloud Staging：CORS 允許清單（多個 origin + Vercel Preview 樣式）；部署、營運與 Cloud smoke 文件（`docs/DEPLOYMENT_STAGING.md`、`docs/OPERATIONS_RUNBOOK.md`、`docs/CLOUD_SMOKE_TEST.md`）；Node 版本限制在 22.x。**遊戲規則不變** |
+| v1.17 | Cloud Staging：CORS 允許清單（多個 origin + Vercel Preview 樣式；Cloud 未設定時 fail closed）；Web Staging = `staging` 分支的 Vercel Preview、`/api/version`；部署、營運與 Cloud smoke 文件（`docs/DEPLOYMENT_STAGING.md`、`docs/OPERATIONS_RUNBOOK.md`、`docs/CLOUD_SMOKE_TEST.md`）；Node 版本限制在 22.x。**遊戲規則不變** |
 | v1.16 | Reliability & Security Hardening：§10.3 錯誤碼與重試語意（`RATE_LIMITED` 改為伺服器端每位使用者限流、新增 `REQUEST_EXPIRED`）；新增 §10.9 Rate Limit、§10.10 action_log 分層保存與 Request ID 有效期限、§10.11 錯誤分類與 log；§12.14 市場歷史排隊讀取、選擇上限、成交提示。詳細的威脅模型與部署注意事項見 `docs/SECURITY_RELIABILITY.md`。**遊戲規則不變** |
 | v1.15 | Market UI & Artifact Trading：新增 §12.14 市場畫面（`/market`）、出售流程、套組失效預測、跨日報價重新確認、價格無法取得時的處理；§12.10 寶物出售 UI 開放。**定價演算法、倍率、基礎價值、套組加成、結算不變** |
 | v1.14 | Market Backend & Daily Pricing：§6.3 市場亂數改為資料庫內密鑰（`private.market_secret`）與確定的整數演算法；§8.2 / §8.3 市場資料表、只新增、權限；§9 改為已實作（延遲生成 + pg_cron、並行、失敗處理、報價與成交價）；§10 回應加 `market`、`sell_artifacts` 必須帶 `marketDate`、新錯誤碼 `MARKET_QUOTE_EXPIRED` / `MARKET_UNAVAILABLE`；§12.10 寶物出售後端開放（UI 在 PR #14）。**倍率範圍、Step、均值回歸、基礎價值、掉落、RNG_VERSION 不變** |
@@ -645,7 +645,7 @@ sequenceDiagram
 
 - **Service Role Key** 只在 Edge Function 內以 `SUPABASE_SERVICE_ROLE_KEY`（Supabase 自動注入）建立 client，只用來呼叫三個 `game_*` RPC；不出現在任何回應、`NEXT_PUBLIC_*` 或瀏覽器。一定先完成 `getUser` 才建立。
 - **`verify_jwt = false`**（`supabase/config.toml`）：gateway 的 JWT 檢查會擋掉不帶 `Authorization` 的瀏覽器 preflight，因此由函式內 `getUser` 驗證每個請求（`OPTIONS` 除外，它不讀寫任何資料）。`getUser` 會向 Auth 伺服器確認 token，已登出 / 被刪除的使用者也會被拒絕。
-- `GAME_API_ALLOWED_ORIGIN`（選填）：CORS 允許清單，逗號分隔；每一項是完整的 origin，或只含一個 `*` 的 Vercel Preview 樣式（`https://<project>-*-<team>.vercel.app`，`*` 只比對 `[a-z0-9-]`，後面必須以 `-` 開頭）。符合時回傳該 origin 與 `Vary: Origin`，不符合時不回傳 `Access-Control-Allow-Origin`。未設定時為 `*`（只適合本地；Staging / Production 必須設定）。API 本身靠 Bearer token，不依賴 cookie【v1.17】。
+- `GAME_API_ALLOWED_ORIGIN`（選填）：CORS 允許清單，逗號分隔；每一項是完整的 origin，或只含一個 `*` 的 Vercel Preview 樣式（`https://<project>-*-<team>.vercel.app`，`*` 只比對 `[a-z0-9-]`，後面必須以 `-` 開頭）。符合時回傳該 origin 與 `Vary: Origin`，不符合時不回傳 `Access-Control-Allow-Origin`。未設定時：本地為 `*`；Cloud（`SUPABASE_URL` 是 https）**拒絕所有瀏覽器 origin**（fail closed，並記錄 `cors_not_configured`）。Staging 只允許 `staging` 分支的 Vercel Branch URL。API 本身靠 Bearer token，不依賴 cookie【v1.17】。
 - `EDGE_DIAGNOSTICS=true`（只在本機 `[edge_runtime.secrets]`）：回應加上 `Server-Timing` 與 `X-Diagnostics-Memory`，供 §10.8 測量；正式環境不設定。
 
 ### 10.9 Rate Limit【v1.16】

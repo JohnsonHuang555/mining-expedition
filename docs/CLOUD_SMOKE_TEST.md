@@ -1,6 +1,6 @@
 # 《挖礦探險隊》Cloud Smoke Test（Staging）
 
-**Version 1.0（PR #16）** — 在 Supabase Cloud Staging + Vercel Preview 上驗證核心流程、安全與可靠性。
+**Version 1.0（PR #16）** — 在 Supabase Cloud Staging + Vercel `staging` 分支 Preview 上驗證核心流程、安全與可靠性。
 **狀態：尚未執行**（Cloud 資源尚未建立）。結果表在 §5，執行後填寫；不得在未執行時標示 Passed。
 
 ---
@@ -28,15 +28,15 @@ STAGING_WEB_URL=https://... SMOKE_USER_A_EMAIL=... ... pnpm --filter @mining/e2e
 
 | 檔案 | 檢查 |
 |---|---|
-| `tests/integration/staging-smoke.test.ts` | health；未登入 / 無效 JWT / anon key 當 JWT → 401；game-state 與市場報價（Asia/Taipei、12 件）；同一 Request ID 重送 → Idempotent-Replayed、不同內容 → 409；報價過期 → 409；跨玩家讀寫隔離、body 帶 playerId → 400；CORS 允許 / 拒絕；（選用）限流 429 + Retry-After 與恢復；延遲摘要 `SMOKE_LATENCY` |
-| `tests/e2e/cloud/cloud-smoke.spec.ts` | 封閉測試登入畫面；登入（第一次建立角色）；同步；重新整理保留；市場（歷史已讀取）、背包、圖鑑；登出；換帳號後顯示的是新帳號（不殘留） |
+| `tests/integration/staging-smoke.test.ts` | health；未登入 / 無效 JWT / anon key 當 JWT → 401；game-state 與市場報價（Asia/Taipei、12 件）；同一 Request ID 重送 → Idempotent-Replayed、不同內容 → 409；報價過期 → 409；跨玩家讀寫隔離、body 帶 playerId → 400；CORS 允許 / 拒絕（多個拒絕案例：其他網域、http、網域偽裝、其他 Vercel 網址、`null`）；（選用）限流 429 + Retry-After 與恢復；延遲摘要 `SMOKE_LATENCY` |
+| `tests/e2e/cloud/cloud-smoke.spec.ts` | 部署版本（`/api/version` = `EXPECTED_COMMIT`、`env=preview`、`ref=staging`）；封閉測試登入畫面；登入（第一次建立角色）；同步；重新整理保留；市場（歷史已讀取）、背包、圖鑑；登出；換帳號後顯示的是新帳號（不殘留） |
 | `supabase/ops/ops-report.sql` | Cloud cron 執行結果、積壓、市場、連線 |
 
 ## 3. 需求對照（17 項）
 
 | # | 項目 | 方式 |
 |---|---|---|
-| 1 | 開啟 Vercel Preview | 瀏覽器自動化 + 手動 |
+| 1 | 開啟 Vercel Staging（`staging` 分支 Branch URL；`/api/version` 是部署的 commit） | 瀏覽器自動化 + 手動 |
 | 2 | 註冊及登入 | 公開註冊關閉：受邀帳號登入（自動化）；註冊被拒的訊息（手動） |
 | 3 | 建立角色 | 自動化（第一次登入） |
 | 4 | 正常挖礦 | 自動化（同步）+ 手動觀察進度 |

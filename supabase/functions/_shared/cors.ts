@@ -10,9 +10,12 @@ export type OriginRule = { exact: string } | { prefix: string; suffix: string };
 
 const ORIGIN_RE = /^https?:\/\/[a-z0-9.-]+(:\d{1,5})?$/;
 
-/** 解析允許清單；格式錯誤的項目丟棄（不會因此變成允許全部） */
-export function parseAllowedOrigins(raw: string | undefined | null): OriginRule[] | "*" {
-  if (raw === undefined || raw === null || raw.trim() === "") return "*";
+/**
+ * 解析允許清單；格式錯誤的項目丟棄（不會因此變成允許全部）。
+ * requireExplicit = true（Cloud）：沒有設定時**拒絕所有瀏覽器 origin**（fail closed），不會退回 `*`。
+ */
+export function parseAllowedOrigins(raw: string | undefined | null, requireExplicit = false): OriginRule[] | "*" {
+  if (raw === undefined || raw === null || raw.trim() === "") return requireExplicit ? [] : "*";
   const rules: OriginRule[] = [];
   for (const item of raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)) {
     const stars = item.split("*").length - 1;
@@ -43,6 +46,14 @@ export function matchOrigin(rules: OriginRule[] | "*", origin: string | null): s
     }
   }
   return null;
+}
+
+/**
+ * 是否在 Cloud 上執行：Supabase Cloud 的 SUPABASE_URL 是 https://<ref>.supabase.co；
+ * 本地 Edge Runtime 是容器內的 http://kong:8000 等。Cloud 必須明確設定 GAME_API_ALLOWED_ORIGIN。
+ */
+export function requiresExplicitOrigins(supabaseUrl: string | undefined): boolean {
+  return (supabaseUrl ?? "").startsWith("https://");
 }
 
 export const CORS_BASE = {
