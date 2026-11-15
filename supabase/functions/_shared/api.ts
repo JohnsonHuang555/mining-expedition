@@ -106,7 +106,7 @@ export function gameDb(timing: Timing): GameDb {
   const db = supabaseGameDb(service);
   const timed = <A extends unknown[], R>(f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
     const s = performance.now();
-    let timer: number | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
         f(...a),
