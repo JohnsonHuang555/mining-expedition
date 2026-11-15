@@ -177,6 +177,7 @@ describe("交易提示文字", () => {
     expect(describeAction({ ...base, outcome: "rejected", message: "金幣不足", synced: false })).toBe("✗ 金幣不足：此操作未執行，沒有扣除金幣或素材");
     expect(describeAction({ ...base, outcome: "rejected", message: "金幣不足", synced: true })).toBe("✗ 金幣不足：此操作未執行，沒有扣除金幣或素材（挖掘結算已同步）");
     expect(describeAction({ ...base, outcome: "uncertain", message: null, synced: false })).toContain("結果尚未確認");
+    expect(describeAction({ ...base, outcome: "uncertain", message: null, synced: false, code: "RATE_LIMITED" })).toContain("伺服器尚未執行");
     expect(describeAction({ ...base, outcome: "rejected", message: "x", synced: true })).not.toContain("沒有任何變更");
   });
 });
