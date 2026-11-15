@@ -20,7 +20,7 @@
 
 import type { MiningMode } from "@mining/game-data";
 import { type GameCommand, type GameEvent, type MarketQuote, type OfflineReport, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
-import { type ApiResult, type GameApi, newRequestId } from "./api";
+import { type ApiResult, type GameApi, newRequestId, retryAfterOf } from "./api";
 import { type ActionLock, LOCK_TIMEOUT, type PendingAction, type PendingStore, memoryActionLock, memoryPendingStore, sameCommand } from "./pending";
 import { type RevealItem, RevealQueue } from "./reveal";
 import { type BusyOp, type GameStore, type GameUiState, initialUiState, lootFromEvents, mergeLoot } from "./store";
@@ -109,10 +109,18 @@ const MESSAGES: Partial<Record<string, string>> = {
   UNCERTAIN: "網路不穩，操作結果尚未確認；恢復連線後會以同一筆請求自動確認（不會重複扣款）",
   PENDING_OTHER: "上一個操作（可能在其他分頁）的結果尚未確認，確認後才能進行其他操作",
   LOCKED: "其他分頁正在進行交易，請稍後再試",
+  RATE_LIMITED: "操作太頻繁，稍後會以同一筆請求自動重試（不會重複執行）",
+  REQUEST_EXPIRED: "這個操作已超過有效期限：以伺服器紀錄為準，畫面已重新同步",
   MARKET_QUOTE_EXPIRED: "市場價格已更新（換日），請確認新的報價後再出售",
   MARKET_UNAVAILABLE: "今日市場價格暫時無法取得，請稍後再試",
 };
 export const messageFor = (code: string, fallback?: string) => MESSAGES[code] ?? fallback ?? "操作失敗";
+
+/**
+ * 未確認操作的有效期限（TECHNICAL_SPEC §10.8）：超過時改送「只調和、不執行」。
+ * 伺服器若從未收到這個 requestId 會確認作廢（之後也不會執行）；收到過則回傳原本的結果。
+ */
+export const PENDING_MAX_AGE_MS = 7 * 24 * 3_600_000;
 
 /** 沒有得到伺服器確定結果的錯誤：不能假設伺服器沒有提交 */
 const UNCERTAIN = new Set(["NETWORK", "BAD_RESPONSE", "SERVER_BUSY", "VERSION_CONFLICT", "INTERNAL_ERROR", "UNAUTHORIZED"]);
@@ -150,6 +158,13 @@ export class GameController {
   private booted: Promise<void> | null = null;
   private unsubscribe: (() => void) | null = null;
   private lastSyncAt = -Infinity;
+  private marketWatchers = 0;
+  private marketForce = false;
+  private marketFailures = 0;
+  private marketTimer: unknown = null;
+  private marketJob: Promise<void> | null = null;
+  /** RATE_LIMITED 的 Retry-After：在這之前不自動同步 / 重試（clock.now 基準） */
+  private retryAfterUntil = -Infinity;
   private disposed = false;
 
   constructor(opts: ControllerOptions) {
@@ -206,6 +221,7 @@ export class GameController {
     this.disposed = true;
     this.active = 0;
     this.clearTimer();
+    this.clearMarketTimer();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.unsubscribePending?.();
@@ -343,8 +359,78 @@ export class GameController {
    * 只是顯示：成交價與市場日的合法性一律由伺服器在交易時判斷。
    */
   refreshMarket(): Promise<void> {
-    if (this.disposed || this.op || this.state.phase !== "ready") return Promise.resolve();
-    return this.exclusive("refresh", () => this.doRefresh()).then(() => this.schedule());
+    this.marketForce = true;
+    return this.runMarket();
+  }
+
+  /**
+   * 市場頁面掛載期間呼叫（回傳取消函式）：需要時取得歷史與換日後的新報價。
+   * - 正在 bootstrap / 結算 / 交易時不插隊：等目前的操作結束後才讀取（PR #14 Review P2）。
+   * - 失敗或伺服器仍是舊報價時退避重試（2 秒起，最多 60 秒，尊重 Retry-After），不會連續重送。
+   * - 離開市場（沒有任何頁面在看）就停止重試；已有歷史時重新掛載不會再送請求。
+   */
+  watchMarket(): () => void {
+    this.marketWatchers++;
+    void this.runMarket();
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      this.marketWatchers = Math.max(0, this.marketWatchers - 1);
+      if (this.marketWatchers === 0) {
+        this.clearMarketTimer();
+        this.marketFailures = 0;
+      }
+    };
+  }
+
+  /** 報價需要更新：沒有報價、沒有歷史、或本機時間已超過 nextRefreshAt（可能換日；只是顯示用的判斷） */
+  private marketStale(): boolean {
+    const m = this.state.market;
+    return !m || m.history === undefined || Date.now() >= m.nextRefreshAt;
+  }
+
+  private runMarket(): Promise<void> {
+    if (this.marketJob) return this.marketJob;
+    const job = (async () => {
+      // 等目前的操作（bootstrap、結算、交易）結束；之後才讀取（不中斷、不併發）
+      while (this.op && !this.disposed) await this.op.catch(() => undefined);
+      if (this.disposed || this.state.phase !== "ready") return;
+      if (!this.marketForce && (this.marketWatchers === 0 || !this.marketStale())) return;
+      this.marketForce = false;
+      this.clearMarketTimer();
+      let ok = false;
+      await this.exclusive("refresh", async () => {
+        const r = await this.api.getState();
+        if (this.disposed) return;
+        if (r.ok) {
+          ok = true;
+          this.applyView(r, false);
+          this.markSyncOk();
+        } else this.handleFailure(r, "refresh");
+      });
+      this.marketFailures = ok && !this.marketStale() ? 0 : this.marketFailures + 1;
+    })().finally(() => {
+      this.marketJob = null;
+      if (this.disposed) return;
+      if (this.marketWatchers > 0 && this.marketFailures > 0 && this.marketStale()) {
+        const backoff = Math.min(60_000, 2_000 * 2 ** (this.marketFailures - 1));
+        const delay = Math.max(backoff, this.retryAfterUntil - this.clock.now());
+        this.clearMarketTimer();
+        this.marketTimer = this.clock.setTimeout(() => {
+          this.marketTimer = null;
+          void this.runMarket();
+        }, delay);
+      }
+      this.schedule();
+    });
+    this.marketJob = job;
+    return job;
+  }
+
+  private clearMarketTimer(): void {
+    if (this.marketTimer !== null) this.clock.clearTimeout(this.marketTimer);
+    this.marketTimer = null;
   }
 
   claimReport(): Promise<boolean> {
@@ -392,7 +478,9 @@ export class GameController {
     this.pendingStore.put(action); // 每筆操作自己的紀錄：不會覆蓋其他分頁的未確認交易
     this.refreshPending();
     const before = this.state.view?.state.stateVersion ?? -1;
-    const r = await this.api.action(action.command, action.requestId);
+    // 超過有效期限的未確認操作：只調和、不執行（伺服器回原本的結果，或確認作廢且之後不會執行）
+    const expire = Date.now() - action.createdAt > PENDING_MAX_AGE_MS;
+    const r = await this.api.action(action.command, action.requestId, expire ? { expire: true } : undefined);
     if (this.disposed) return "uncertain"; // 已登出 / 換帳號：不寫入任何畫面狀態；未確認操作留在該使用者的 storage
     const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = [], synced = false, code: string | null = null) =>
       this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, code, synced, events, at: Date.now() } });
@@ -407,6 +495,23 @@ export class GameController {
       // 只保留這個操作本身的事件（不含操作前的在線結算方塊）
       result("ok", null, r.body.events.filter((e) => e.type !== "block_completed" && e.type !== "mining_stopped"));
       return "ok";
+    }
+    if (r.code === "RATE_LIMITED") {
+      // 伺服器沒有執行、也沒有保存：保留未確認紀錄，Retry-After 之後以同一個 requestId 自動重試
+      this.retryAfterUntil = this.clock.now() + (retryAfterOf(r) ?? 5_000);
+      this.set({ notice: messageFor("RATE_LIMITED") });
+      result("uncertain", messageFor("RATE_LIMITED"), [], false, r.code);
+      return "uncertain";
+    }
+    if (r.code === "REQUEST_EXPIRED") {
+      // 伺服器的確定答案（已處理過 / 已作廢）：清除紀錄；詳細結果以重新讀取的狀態為準（Client 不自行判定成功或失敗）
+      resolved();
+      const e = r.body?.expired;
+      const outcome = e?.processed && e.ok ? "ok" : "rejected";
+      result(outcome, messageFor("REQUEST_EXPIRED"), [], false, r.code);
+      this.set({ notice: messageFor("REQUEST_EXPIRED") });
+      await this.doRefresh();
+      return outcome;
     }
     if (isUncertain(r)) {
       if (r.code === "UNAUTHORIZED") {
@@ -439,6 +544,8 @@ export class GameController {
     const p = fn().finally(() => {
       if (this.op === p) this.op = null;
       this.set({ busy: null });
+      // 市場頁面在等歷史（例如 bootstrap 期間掛載）：操作結束後補讀一次（失敗時交給退避計時器，不在這裡連續重試）
+      if (this.marketWatchers > 0 && this.marketFailures === 0 && !this.marketJob) queueMicrotask(() => void this.runMarket());
     });
     this.op = p;
     return p;
@@ -567,7 +674,8 @@ export class GameController {
       this.set({ view: r.body.state, fresh: false, receivedAt: this.clock.now() });
       this.revealNewlyHeld(r.body.state.state); // 拒絕前的結算可能已經取得寶物（拒絕回應沒有事件）
     }
-    const transient = r.code === "NETWORK" || r.code === "SERVER_BUSY" || r.code === "VERSION_CONFLICT" || r.code === "BAD_RESPONSE";
+    if (r.code === "RATE_LIMITED") this.retryAfterUntil = Math.max(this.retryAfterUntil, this.clock.now() + (retryAfterOf(r) ?? 5_000));
+    const transient = r.code === "NETWORK" || r.code === "SERVER_BUSY" || r.code === "VERSION_CONFLICT" || r.code === "BAD_RESPONSE" || r.code === "RATE_LIMITED";
     if (transient) {
       const failures = this.state.sync.failures + 1;
       this.set({ sync: { ...this.state.sync, ok: false, failures, message: messageFor(r.code) } });
@@ -636,8 +744,9 @@ export class GameController {
   private schedule(override?: number): void {
     this.clearTimer();
     if (this.disposed) return;
-    const delay = override ?? this.nextDelay();
+    let delay = override ?? this.nextDelay();
     if (delay === null) return;
+    delay = Math.max(delay, this.retryAfterUntil - this.clock.now()); // 尊重伺服器的 Retry-After
     this.timer = this.clock.setTimeout(() => {
       this.timer = null;
       if (this.state.phase === "error") void this.retryBootstrap();

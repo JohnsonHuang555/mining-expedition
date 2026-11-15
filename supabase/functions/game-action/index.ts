@@ -10,7 +10,7 @@
 // executeRequest → game_commit（CAS，衝突時以同一個 key 重試最多 3 次）。
 
 import { handleGameRequest } from "@mining/game-server";
-import { authenticate, errorResponse, gameDb, log, readJson, respond, serve } from "../_shared/api.ts";
+import { RATE_LIMITS, authenticate, errorResponse, gameDb, log, logRequest, readJson, respond, serve } from "../_shared/api.ts";
 
 serve(["POST"], async (req, timing) => {
   const userId = await authenticate(req, timing);
@@ -23,6 +23,15 @@ serve(["POST"], async (req, timing) => {
   if (Object.keys(body).length !== 1 || !("command" in body)) {
     return errorResponse(400, "INVALID_REQUEST", "body must be { command } only");
   }
-  const r = await handleGameRequest(gameDb(timing), { playerId: userId, requestId: key, command: body.command }, { log });
-  return respond(r.response, timing, r);
+  // Idempotency-Expire: true = Client 的未確認操作已超過有效期限：只調和、不執行（TECHNICAL_SPEC §10.8）
+  const expire = req.headers.get("Idempotency-Expire");
+  if (expire !== null && expire !== "true") return errorResponse(400, "INVALID_REQUEST", "Idempotency-Expire must be true when present");
+  const r = await handleGameRequest(
+    gameDb(timing),
+    { playerId: userId, requestId: key, command: body.command },
+    { log, rateLimit: RATE_LIMITS["game-action"], expireIfUnknown: expire === "true" },
+  );
+  const res = respond(r.response, timing, r);
+  logRequest("game-action", userId, r.response.requestId, r.response, res.status, timing, r);
+  return res;
 });

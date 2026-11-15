@@ -126,7 +126,7 @@ describe("未確認操作（Idempotency-Key 持續保存）", () => {
   });
 
   it("保存的資料不可信：格式錯誤、settle、非 UUID 都丟棄", () => {
-    const ok: PendingAction = { requestId: crypto.randomUUID(), command: BUY, createdAt: 1 };
+    const ok: PendingAction = { requestId: crypto.randomUUID(), command: BUY, createdAt: Date.now() };
     expect(parsePending(JSON.stringify(ok))).toEqual(ok);
     expect(parsePending("{")).toBeNull();
     expect(parsePending(JSON.stringify({ ...ok, requestId: "x" }))).toBeNull();

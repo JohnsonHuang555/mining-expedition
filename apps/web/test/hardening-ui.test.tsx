@@ -83,8 +83,8 @@ describe("未確認操作的保存（v2：每筆一個 key）", () => {
     const u = crypto.randomUUID();
     const tabA = browserPendingStore(u);
     const tabB = browserPendingStore(u);
-    const sell = { requestId: crypto.randomUUID(), command: { type: "sell_items", itemId: "stone", quantity: 1 } as const, createdAt: 1 };
-    const buy = { requestId: crypto.randomUUID(), command: { type: "purchase_pickaxe", pickaxeId: "pick_stone" } as const, createdAt: 2 };
+    const sell = { requestId: crypto.randomUUID(), command: { type: "sell_items", itemId: "stone", quantity: 1 } as const, createdAt: Date.now() + 1 };
+    const buy = { requestId: crypto.randomUUID(), command: { type: "purchase_pickaxe", pickaxeId: "pick_stone" } as const, createdAt: Date.now() + 2 };
     tabA.put(sell);
     tabB.put(buy);
     expect(tabA.list()).toEqual([sell, buy]);
@@ -92,7 +92,7 @@ describe("未確認操作的保存（v2：每筆一個 key）", () => {
     expect(tabA.list()).toEqual([sell]);
     expect(localStorage.getItem(pendingStorageKey(u, sell.requestId))).not.toBeNull();
 
-    const legacy = { requestId: crypto.randomUUID(), command: { type: "craft", materialId: "iron_ingot", times: 1 } as const, createdAt: 0 };
+    const legacy = { requestId: crypto.randomUUID(), command: { type: "craft", materialId: "iron_ingot", times: 1 } as const, createdAt: Date.now() - 60_000 };
     localStorage.setItem(legacyPendingStorageKey(u), JSON.stringify(legacy));
     expect(tabB.list()).toEqual([legacy, sell]);
     expect(localStorage.getItem(legacyPendingStorageKey(u))).toBeNull();

@@ -12,9 +12,27 @@ export type CreateResult =
   | { status: "created" | "exists"; state: PlayerGameState }
   | { status: "no_auth_user" };
 
+/** 同一個 key 已處理過，但詳細回應已超過保存期限（action_log compaction）：不可重新執行 */
+export interface ExpiredRecord {
+  status: "expired";
+  /** 當初的結果是否成功（ok: true） */
+  ok: boolean;
+  committed: boolean;
+  processedAt: number;
+}
+
+/** 每位使用者、每個 API 的固定視窗限制（只在伺服器端，由資料庫計數） */
+export interface RateLimit {
+  bucket: "game-action" | "game-state" | "character-create";
+  limit: number;
+  windowMs: number;
+}
+
 export type LoadResult =
   | { status: "ok"; state: unknown; rngSecret: string; serverNow: number; market: MarketSnapshot }
   | { status: "replay"; response: ApiResponse }
+  | ExpiredRecord
+  | { status: "rate_limited"; retryAfterMs: number }
   | { status: "mismatch" }
   | { status: "not_found" };
 
@@ -40,14 +58,18 @@ export interface CommitArgs {
 export type CommitResult =
   | { status: "committed" | "recorded"; stateVersion: number }
   | { status: "replay"; response: ApiResponse }
+  | ExpiredRecord
   | { status: "mismatch" }
   | { status: "version_conflict"; stateVersion: number }
   | { status: "not_found" };
 
 export interface GameDb {
   createPlayer(playerId: string, state: PlayerGameState): Promise<CreateResult>;
-  loadSnapshot(playerId: string, idempotencyKey: string | null, requestHash: string | null): Promise<LoadResult>;
+  /** rate：只在新請求（不是重送）時計數；重送與已過期的 key 不受限 */
+  loadSnapshot(playerId: string, idempotencyKey: string | null, requestHash: string | null, rate?: RateLimit): Promise<LoadResult>;
   commit(args: CommitArgs): Promise<CommitResult>;
+  /** character-create 用；回傳 0 = 允許，> 0 = 要等待的毫秒 */
+  rateLimit(playerId: string, rate: RateLimit): Promise<number>;
 }
 
 /** 資料庫錯誤（連線、約束違反、交易失敗）。訊息只用於伺服器端紀錄，不回傳給 Client */
@@ -75,8 +97,22 @@ async function call<T>(client: RpcClient, fn: string, args: Record<string, unkno
 export function supabaseGameDb(client: RpcClient): GameDb {
   return {
     createPlayer: (playerId, state) => call(client, "game_create_player", { p_player_id: playerId, p_state: state }),
-    loadSnapshot: (playerId, idempotencyKey, requestHash) =>
-      call(client, "game_load_snapshot", { p_player_id: playerId, p_idempotency_key: idempotencyKey, p_request_hash: requestHash }),
+    loadSnapshot: (playerId, idempotencyKey, requestHash, rate) =>
+      call(client, "game_load_snapshot", {
+        p_player_id: playerId,
+        p_idempotency_key: idempotencyKey,
+        p_request_hash: requestHash,
+        ...(rate ? { p_rate_bucket: rate.bucket, p_rate_limit: rate.limit, p_rate_window_ms: rate.windowMs } : {}),
+      }),
+    rateLimit: async (playerId, rate) => {
+      const r = await call<{ status: string; retryAfterMs?: number }>(client, "game_rate_limit", {
+        p_user: playerId,
+        p_bucket: rate.bucket,
+        p_limit: rate.limit,
+        p_window_ms: rate.windowMs,
+      });
+      return r.status === "rate_limited" ? Math.max(1, Number(r.retryAfterMs ?? 1000)) : 0;
+    },
     commit: (a) =>
       call(client, "game_commit", {
         p_player_id: a.playerId,
@@ -90,4 +126,23 @@ export function supabaseGameDb(client: RpcClient): GameDb {
         p_response: a.response,
       }),
   };
+}
+
+/**
+ * 預設的 rate limit（每位使用者；固定視窗）。依「合法使用的上限」設定：
+ * - 自動同步約每 5–20 秒一次（多分頁時各自同步）、玩家連續點擊交易每秒 1–2 次；
+ * - 網路不穩時 API Client 以同一個 key 重送：重送（replay）不計數。
+ * Edge Function 可用環境變數覆寫（GAME_RATE_LIMIT_ACTION 等，格式 "次數/毫秒"）。
+ */
+export const DEFAULT_RATE_LIMITS: Readonly<Record<RateLimit["bucket"], RateLimit>> = {
+  "game-action": { bucket: "game-action", limit: 30, windowMs: 10_000 },
+  "game-state": { bucket: "game-state", limit: 20, windowMs: 10_000 },
+  "character-create": { bucket: "character-create", limit: 5, windowMs: 60_000 },
+};
+
+/** "30/10000" → { limit: 30, windowMs: 10000 }；格式錯誤時回傳預設值 */
+export function parseRateLimit(bucket: RateLimit["bucket"], raw: string | undefined | null): RateLimit {
+  const m = /^(\d{1,5})\/(\d{4,7})$/.exec(raw ?? "");
+  if (!m) return DEFAULT_RATE_LIMITS[bucket];
+  return { bucket, limit: Math.max(1, Number(m[1])), windowMs: Number(m[2]) };
 }

@@ -7,7 +7,7 @@
 // - 本地診斷（EDGE_DIAGNOSTICS=true，只在 supabase/config.toml 設定）時附上 Server-Timing 與記憶體資訊。
 
 import { createClient } from "@supabase/supabase-js";
-import { type ApiResponse, type GameDb, type HandleResult, httpStatus, supabaseGameDb } from "@mining/game-server";
+import { type ApiResponse, type GameDb, GameDbError, type HandleResult, type RateLimit, httpStatus, parseRateLimit, supabaseGameDb } from "@mining/game-server";
 import { engineInfo } from "@mining/game-engine";
 import { readJsonBody } from "./body.ts";
 
@@ -16,9 +16,9 @@ export const MAX_BODY_BYTES = 16 * 1024;
 
 const CORS = {
   "Access-Control-Allow-Origin": Deno.env.get("GAME_API_ALLOWED_ORIGIN") ?? "*",
-  "Access-Control-Allow-Headers": "authorization, apikey, content-type, idempotency-key, x-client-info",
+  "Access-Control-Allow-Headers": "authorization, apikey, content-type, idempotency-key, idempotency-expire, x-client-info",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Expose-Headers": "idempotent-replayed, x-engine-version, server-timing",
+  "Access-Control-Expose-Headers": "idempotent-replayed, x-engine-version, server-timing, retry-after",
 };
 
 export function json(body: unknown, status: number, headers: Record<string, string> = {}): Response {
@@ -31,9 +31,38 @@ export function json(body: unknown, status: number, headers: Record<string, stri
 const errorBody = (code: string, message: string): ApiResponse => ({ ok: false, requestId: null, command: null, error: { code: code as never, message } });
 export const errorResponse = (status: number, code: string, message: string) => json(errorBody(code, message), status);
 
-/** 伺服器紀錄：結構化 JSON，不含 JWT、金鑰或密鑰 */
+/** 伺服器紀錄：結構化 JSON。不寫入 JWT、Authorization header、金鑰、RNG / 市場密鑰或玩家狀態內容 */
 export function log(event: string, detail: Record<string, unknown>): void {
-  console.error(JSON.stringify({ event, ...detail }));
+  console.error(JSON.stringify({ event, at: new Date().toISOString(), ...detail }));
+}
+
+/**
+ * Rate limit（每位使用者、伺服器端、資料庫計數）。只用已驗證的 user id，不使用任何可偽造的 IP header。
+ * 環境變數格式 "次數/毫秒"（例如 GAME_RATE_LIMIT_ACTION=30/10000）；未設定時使用 DEFAULT_RATE_LIMITS。
+ */
+export const RATE_LIMITS: Record<RateLimit["bucket"], RateLimit> = {
+  "game-action": parseRateLimit("game-action", Deno.env.get("GAME_RATE_LIMIT_ACTION")),
+  "game-state": parseRateLimit("game-state", Deno.env.get("GAME_RATE_LIMIT_STATE")),
+  "character-create": parseRateLimit("character-create", Deno.env.get("GAME_RATE_LIMIT_CREATE")),
+};
+
+/** 每個 RPC 的逾時（毫秒）。逾時視為「結果不確定」：回 SERVER_BUSY，Client 以同一個 key 重試 / 調和 */
+const DB_TIMEOUT_MS = Math.max(1_000, Number(Deno.env.get("GAME_DB_TIMEOUT_MS") ?? 8_000) || 8_000);
+
+/** 請求摘要（只在錯誤或重送時寫入，避免大量 log）：可用 requestId 追查 */
+export function logRequest(fn: string, userId: string | null, requestId: string | null, response: ApiResponse, status: number, timing: Timing, extra: Partial<HandleResult> = {}): void {
+  if (status < 400 && !extra.replayed) return;
+  log(status >= 500 ? "request_failed" : "request_rejected", {
+    fn,
+    status,
+    code: response.ok ? null : response.error.code,
+    requestId,
+    command: response.command,
+    userId,
+    replayed: extra.replayed ?? false,
+    attempts: extra.attempts ?? 0,
+    durationMs: Math.round(performance.now() - timing.startedAt),
+  });
 }
 
 function env(name: string): string {
@@ -77,20 +106,33 @@ export function gameDb(timing: Timing): GameDb {
   const db = supabaseGameDb(service);
   const timed = <A extends unknown[], R>(f: (...a: A) => Promise<R>) => async (...a: A): Promise<R> => {
     const s = performance.now();
+    let timer: number | undefined;
     try {
-      return await f(...a);
+      return await Promise.race([
+        f(...a),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new GameDbError(`rpc timed out after ${DB_TIMEOUT_MS}ms`, "TIMEOUT")), DB_TIMEOUT_MS);
+        }),
+      ]);
     } finally {
+      clearTimeout(timer);
       timing.dbMs += performance.now() - s;
       timing.dbCalls += 1;
     }
   };
-  return { createPlayer: timed(db.createPlayer), loadSnapshot: timed(db.loadSnapshot), commit: timed(db.commit) };
+  return {
+    createPlayer: timed(db.createPlayer),
+    loadSnapshot: timed(db.loadSnapshot),
+    commit: timed(db.commit),
+    rateLimit: timed(db.rateLimit),
+  };
 }
 
 /** 回應：狀態碼依錯誤碼；診斷模式附上分段時間與記憶體 */
 export function respond(response: ApiResponse, timing: Timing, extra: Partial<HandleResult> = {}, statusOverride?: number): Response {
   const headers: Record<string, string> = {};
   if (extra.replayed !== undefined) headers["Idempotent-Replayed"] = String(extra.replayed);
+  if (!response.ok && response.retryAfterMs !== undefined) headers["Retry-After"] = String(Math.max(1, Math.ceil(response.retryAfterMs / 1000)));
   if (diagnostics) {
     const total = performance.now() - timing.startedAt;
     const compute = Math.max(0, total - timing.authMs - timing.dbMs);

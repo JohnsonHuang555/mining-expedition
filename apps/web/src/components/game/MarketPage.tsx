@@ -62,20 +62,23 @@ export function MarketPage() {
   const rows = marketRows(state, market);
   const [counts, setCounts] = useState<Partial<Record<ArtifactId, number>>>({});
   const [confirm, setConfirm] = useState<string[] | null>(null);
-  const [result, setResult] = useState<{ coins: number; count: number } | null>(null);
+  // 成交提示只對應「這一次」成功的 Request ID：之後有任何新的操作結果（或換帳號）就不再顯示舊的成交
+  const [saleRequestId, setSaleRequestId] = useState<string | null>(null);
+  const lastAction = useGame((s) => s.lastAction);
+  const sold = lastAction && lastAction.requestId === saleRequestId && lastAction.outcome === "ok" ? lastAction.events.find((e) => e.type === "artifacts_sold") : undefined;
+  const result = sold && sold.type === "artifacts_sold" ? { coins: sold.coins, count: sold.instanceIds.length } : null;
 
-  // 開啟市場：取得歷史（行動回應只附當日報價）；超過更新時間：取得新報價
-  const hasHistory = market?.history !== undefined;
-  useEffect(() => {
-    if (!hasHistory) void controller.refreshMarket();
-  }, [controller, hasHistory]);
+  // 開啟市場：由 Controller 取得歷史與換日後的新報價（忙碌時排隊、失敗時退避；離開頁面即停止）
+  useEffect(() => controller.watchMarket(), [controller]);
   useEffect(() => {
     if (status === "refreshing") void controller.refreshMarket();
   }, [controller, status, market?.date]);
 
-  // 選擇的數量永遠不超過目前持有（其他分頁出售後自動縮小）
-  const selected = rows.flatMap((r) => pickInstances(r, counts[r.id] ?? 0));
+  // 選擇的數量永遠不超過目前持有（其他分頁出售後自動縮小），合計不超過單次出售上限
+  const clamped = capSelection(rows, counts);
+  const selected = rows.flatMap((r) => pickInstances(r, clamped[r.id] ?? 0));
   const preview = planSale(state, market, selected);
+  const remaining = MAX_ARTIFACTS_PER_SALE - preview.count;
   const canSell = status === "valid" && preview.count > 0 && !preview.tooMany && preview.total !== null;
 
   return (
@@ -102,7 +105,7 @@ export function MarketPage() {
           </div>
           <div className="col-span-2 sm:col-span-1">
             <div className="text-parchment-dim">報價狀態</div>
-            <div className={status === "valid" ? "text-moss" : status === "unavailable" ? "text-danger" : "text-crystal"} data-testid="market-status" data-status={status} role="status">
+            <div className={status === "valid" ? "text-moss" : status === "unavailable" ? "text-danger" : "text-crystal"} data-testid="market-status" data-status={status} data-history={market?.history ? "loaded" : "pending"} role="status">
               {STATUS_TEXT[status]}
             </div>
           </div>
@@ -130,8 +133,9 @@ export function MarketPage() {
             row={r}
             market={market}
             sellable={status === "valid"}
-            count={Math.min(counts[r.id] ?? 0, r.instances.length)}
-            onCount={(n) => setCounts({ ...counts, [r.id]: n })}
+            count={clamped[r.id] ?? 0}
+            room={remaining}
+            onCount={(n) => setCounts({ ...clamped, [r.id]: n })}
           />
         ))}
       </ul>
@@ -146,7 +150,9 @@ export function MarketPage() {
               </b>{" "}
               金幣
             </span>
-            {preview.tooMany && <span className="text-xs text-danger">一次最多出售 {MAX_ARTIFACTS_PER_SALE} 件</span>}
+            <span className="text-xs text-parchment-dim" data-testid="market-remaining">
+              {remaining > 0 ? `還可再選 ${remaining} 件` : `已達單次上限 ${MAX_ARTIFACTS_PER_SALE} 件`}
+            </span>
             {preview.lostSets.length > 0 && <span className="text-xs text-danger">⚠ 會失去套組效果</span>}
             <div className="ml-auto flex gap-2">
               <PixelButton tone="ghost" className="px-3 py-1.5 text-xs" onClick={() => setCounts({})}>
@@ -165,10 +171,11 @@ export function MarketPage() {
           instanceIds={confirm}
           onClose={() => setConfirm(null)}
           onReselect={(ids) => setConfirm(ids)}
-          onDone={(r) => {
+          onStart={() => setSaleRequestId(null)}
+          onDone={(requestId) => {
             setConfirm(null);
             setCounts({});
-            setResult(r);
+            setSaleRequestId(requestId);
           }}
         />
       )}
@@ -176,7 +183,19 @@ export function MarketPage() {
   );
 }
 
-function MarketCard({ row: r, market, sellable, count, onCount }: { row: MarketRow; market: MarketQuote | null; sellable: boolean; count: number; onCount(n: number): void }) {
+/** 每種的件數不超過持有；合計不超過單次上限（依卡片順序保留，超出的部分縮小） */
+function capSelection(rows: MarketRow[], counts: Partial<Record<ArtifactId, number>>): Partial<Record<ArtifactId, number>> {
+  let left = MAX_ARTIFACTS_PER_SALE;
+  const out: Partial<Record<ArtifactId, number>> = {};
+  for (const r of rows) {
+    const n = Math.max(0, Math.min(counts[r.id] ?? 0, r.instances.length, left));
+    if (n > 0) out[r.id] = n;
+    left -= n;
+  }
+  return out;
+}
+
+function MarketCard({ row: r, market, sellable, count, room, onCount }: { row: MarketRow; market: MarketQuote | null; sellable: boolean; count: number; room: number; onCount(n: number): void }) {
   if (!r.discovered) {
     return (
       <li id={`market-${r.id}`} className="flex items-center gap-3 bg-cave-950/70 p-3" data-testid={`market-card-${r.id}`} data-discovered="false" aria-label={`未發現的寶物（${zoneName(r.zone)}）`}>
@@ -249,11 +268,18 @@ function MarketCard({ row: r, market, sellable, count, onCount }: { row: MarketR
           <span className="w-12 text-center font-mono text-sm" data-testid={`market-count-${r.id}`}>
             {count}/{held}
           </span>
-          <button type="button" className="bg-cave-700 px-2 text-sm disabled:opacity-40" disabled={!sellable || count >= held} onClick={() => onCount(count + 1)} aria-label={`${r.name} 增加`}>
+          <button type="button" className="bg-cave-700 px-2 text-sm disabled:opacity-40" disabled={!sellable || count >= held || room <= 0} onClick={() => onCount(count + 1)} aria-label={`${r.name} 增加`}>
             ＋
           </button>
-          <button type="button" className="bg-cave-700 px-2 text-xs disabled:opacity-40" disabled={!sellable || count >= held} onClick={() => onCount(held)}>
-            全部
+          <button
+            type="button"
+            className="bg-cave-700 px-2 text-xs disabled:opacity-40"
+            disabled={!sellable || count >= held || room <= 0}
+            onClick={() => onCount(Math.min(held, count + room))}
+            title={held - count > room ? `單次最多出售 ${MAX_ARTIFACTS_PER_SALE} 件：只會再選 ${room} 件` : undefined}
+            data-testid={`market-all-${r.id}`}
+          >
+            {held - count > room && room > 0 ? `+${room}` : "全部"}
           </button>
         </div>
       )}
@@ -306,7 +332,7 @@ function Trend({ id, points }: { id: ArtifactId; points: PricePoint[] }) {
  * 出售確認：顯示實際會送出的實例、數量、預估收入、市場日 / 報價、剩餘數量與套組影響。
  * 報價或持有在開啟後改變時，畫面以最新資料重新計算，玩家再次按下確認才會送出（不會自動重新出售）。
  */
-function SaleConfirm({ instanceIds, onClose, onReselect, onDone }: { instanceIds: string[]; onClose(): void; onReselect(ids: string[]): void; onDone(r: { coins: number; count: number }): void }) {
+function SaleConfirm({ instanceIds, onClose, onReselect, onStart, onDone }: { instanceIds: string[]; onClose(): void; onReselect(ids: string[]): void; onStart(): void; onDone(requestId: string): void }) {
   const state = useGame((s) => s.view!.state);
   const market = useGame((s) => s.market);
   const { run, actionable } = useAction();
@@ -322,12 +348,11 @@ function SaleConfirm({ instanceIds, onClose, onReselect, onDone }: { instanceIds
   async function sell() {
     if (!market) return;
     setProblem(null);
-    // 送出的永遠是畫面上這個報價的市場日與目前持有的實例；價格由伺服器決定
+    onStart(); // 新交易開始：不再顯示上一筆的成交提示
     const o = await run("sell-artifacts", { type: "sell_artifacts", instanceIds: plan.instanceIds, marketDate: market.date });
     const last = store.getState().lastAction;
-    if (o === "ok") {
-      const sold = last?.events.find((e) => e.type === "artifacts_sold");
-      onDone({ coins: sold && sold.type === "artifacts_sold" ? sold.coins : 0, count: sold && sold.type === "artifacts_sold" ? sold.instanceIds.length : plan.count });
+    if (o === "ok" && last) {
+      onDone(last.requestId); // 成交金額只取自這個 Request ID 的伺服器事件
       return;
     }
     setAttempt((n) => n + 1); // 重新啟用確認按鈕（下一次是新的 Request ID）

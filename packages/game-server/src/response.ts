@@ -22,6 +22,8 @@ export type ApiErrorCode =
   | "CHARACTER_EXISTS"
   | "IDEMPOTENCY_MISMATCH"
   | "VERSION_CONFLICT" //   重試 3 次仍衝突（可用同一個 key 再試）
+  | "RATE_LIMITED" //       請求太頻繁（未執行、未保存）；Retry-After 之後以同一個 key 重試
+  | "REQUEST_EXPIRED" //    這個 key 已處理過但詳細結果已過保存期限，或已確認作廢；絕不重新執行（見 expired）
   | "SERVER_BUSY" //        暫時性錯誤（資料庫錯誤、時間倒退）；可用同一個 key 再試
   | "INTERNAL_ERROR"; //    伺服器狀態異常（不應發生）；細節只記在伺服器端
 
@@ -52,10 +54,17 @@ export type ApiResponse =
       state?: PlayerStateView;
       stateVersion?: number;
       market?: MarketQuote;
+      /** RATE_LIMITED：建議等待的毫秒（也在 Retry-After header） */
+      retryAfterMs?: number;
+      /**
+       * REQUEST_EXPIRED：processed = 伺服器當初確實處理過這個 key（ok = 當初是否成功）；
+       * processed = false = 已確認作廢（從未執行，之後也不會執行）。Client 應重新讀取狀態。
+       */
+      expired?: { processed: boolean; ok: boolean | null; processedAt: number | null };
     };
 
 /** 錯誤是否可以用同一個 Idempotency-Key 重試（這類回應不保存在 action_log） */
-export const RETRYABLE: ReadonlySet<ApiErrorCode> = new Set(["VERSION_CONFLICT", "SERVER_BUSY", "INTERNAL_ERROR", "MARKET_UNAVAILABLE"]);
+export const RETRYABLE: ReadonlySet<ApiErrorCode> = new Set(["VERSION_CONFLICT", "SERVER_BUSY", "INTERNAL_ERROR", "MARKET_UNAVAILABLE", "RATE_LIMITED"]);
 
 /** 對應的 HTTP 狀態碼（Edge Function 使用） */
 export function httpStatus(r: ApiResponse): number {
@@ -74,6 +83,10 @@ export function httpStatus(r: ApiResponse): number {
     case "SERVER_BUSY":
     case "MARKET_UNAVAILABLE":
       return 503;
+    case "RATE_LIMITED":
+      return 429;
+    case "REQUEST_EXPIRED":
+      return 410;
     case "INTERNAL_ERROR":
       return 500;
     default:

@@ -111,6 +111,11 @@ export function apiResponseIssue(x: unknown): string | null {
   }
   const err = x.error;
   if (!isObj(err) || !isStr(err.code) || !isStr(err.message)) return "error";
+  if (x.retryAfterMs !== undefined && !isNonNegInt(x.retryAfterMs)) return "retryAfterMs";
+  if (x.expired !== undefined) {
+    const e = x.expired;
+    if (!isObj(e) || typeof e.processed !== "boolean" || !(e.ok === null || typeof e.ok === "boolean") || !(e.processedAt === null || isNonNegInt(e.processedAt))) return "expired";
+  }
   if (x.state !== undefined) {
     const vi = viewIssue(x.state);
     if (vi) return vi;
