@@ -1,6 +1,7 @@
 "use client";
 
 import type { ArtifactRarity } from "@mining/game-data";
+import Link from "next/link";
 import { useRef, useState } from "react";
 import { ArtifactIcon } from "@/components/ui/artifact-icon";
 import { useDialogFocus } from "@/components/ui/dialog-focus";
@@ -182,7 +183,15 @@ function ArtifactDetail({ entry: e, onClose }: { entry: CollectionEntry; onClose
         ) : (
           <p className="mt-3 text-sm text-parchment-dim">尚未發現。在{zoneName(e.zone)}挖掘時有機會取得。</p>
         )}
-        {e.discovery && <p className="mt-2 text-[11px] text-parchment-dim">基礎估值不是當日成交價；寶物出售與每日市場價格將在後續版本開放。</p>}
+        {e.discovery && (
+          <p className="mt-2 text-[11px] text-parchment-dim">
+            基礎估值不是當日成交價。
+            <Link href={`/market#market-${e.id}`} className="ml-1 text-gold underline" data-testid="detail-market-link">
+              查看市場行情
+            </Link>
+            （出售後圖鑑紀錄仍會保留）
+          </p>
+        )}
         <PixelButton tone="secondary" className="mt-4 w-full" onClick={onClose} ref={close}>
           關閉
         </PixelButton>

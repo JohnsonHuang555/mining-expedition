@@ -87,7 +87,9 @@ export class MemoryBackend {
       const m = this.market.get(d);
       if (m) history.push({ date: d, multipliersPpm: { ...m } });
     }
-    return { date, nextRefreshAt: nextMarketRefreshAt(this.now), multipliersPpm: { ...(this.market.get(date) ?? {}) }, history };
+    // marketUnavailable：模擬當日價格無法產生（伺服器回空的倍率；出售回 MARKET_UNAVAILABLE）
+    const today = this.marketUnavailable ? {} : { ...(this.market.get(date) ?? {}) };
+    return { date, nextRefreshAt: nextMarketRefreshAt(this.now), multipliersPpm: today, history };
   }
 
   state(userId: string): PlayerGameState | null {

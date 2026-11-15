@@ -21,6 +21,8 @@ export interface ActionResult {
   /** ok：伺服器確認成功；rejected：伺服器確認拒絕（交易本身未執行）；uncertain：結果未確認（保留，之後以同一個 requestId 調和） */
   outcome: "ok" | "rejected" | "uncertain";
   message: string | null;
+  /** 拒絕 / 未確認時的錯誤碼（例如 MARKET_QUOTE_EXPIRED：畫面需要讓玩家以新報價重新確認） */
+  code: string | null;
   /**
    * 拒絕時：伺服器是否仍然提交了操作前的結算（executeRequest 先結算、再執行操作；
    * 操作被拒絕時挖掘進度、在線獎勵或離線報告仍可能已經同步）

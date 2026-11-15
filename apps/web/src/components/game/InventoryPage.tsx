@@ -11,6 +11,17 @@ import { coins, itemName } from "@/lib/game/format";
 import { useGame } from "./runtime-context";
 import { useAction } from "./use-action";
 
+/** 同種寶物合併顯示件數（實例的選擇在市場頁面進行） */
+function artifactGroups(list: ReturnType<typeof artifactRows>) {
+  const m = new Map<string, { artifactId: string; name: string; rarity: string; count: number }>();
+  for (const a of list) {
+    const g = m.get(a.artifactId) ?? { artifactId: a.artifactId, name: a.name, rarity: a.rarity, count: 0 };
+    g.count++;
+    m.set(a.artifactId, g);
+  }
+  return [...m.values()];
+}
+
 /** 大量出售需要確認：全部出售（10 個以上）或一次 100 個以上 */
 const needsConfirm = (q: number, have: number) => q >= 100 || (q === have && have >= 10);
 
@@ -75,15 +86,25 @@ export function InventoryPage() {
           </p>
         </Panel>
         {artifacts.length > 0 && (
-          <Panel title="寶物">
+          <Panel title="寶物" right={<span className="text-xs text-parchment-dim">共 {artifacts.length} 件</span>}>
             <ul className="space-y-1 text-sm" aria-label="寶物">
-              {artifacts.map((a) => (
-                <li key={a.instanceId} className={`px-2 py-1 ${a.rarity === "legendary" ? "bg-gold/15 text-gold" : "bg-crystal/15 text-crystal"}`}>
-                  {a.rarity === "legendary" ? "★" : "◆"} {a.name}
+              {artifactGroups(artifacts).map((a) => (
+                <li key={a.artifactId} className={`flex items-center gap-2 px-2 py-1 ${a.rarity === "legendary" ? "bg-gold/15 text-gold" : "bg-crystal/15 text-crystal"}`} data-testid={`inv-artifact-${a.artifactId}`}>
+                  <span>{a.rarity === "legendary" ? "★" : "◆"}</span>
+                  <span className="flex-1">{a.name}</span>
+                  <span className="text-[10px]">{a.rarity === "legendary" ? "Legendary" : "Epic"}</span>
+                  <span className="font-mono" data-testid={`inv-artifact-qty-${a.artifactId}`}>
+                    ×{a.count}
+                  </span>
                 </li>
               ))}
             </ul>
-            <p className="mt-2 text-xs text-parchment-dim">寶物依每日市場價格出售，將在市場與圖鑑上線後開放。</p>
+            <p className="mt-2 text-xs text-parchment-dim">
+              寶物依每日市場價格出售；出售會影響套組加成。
+              <Link href="/market" className="ml-1 text-gold underline" data-testid="inv-to-market">
+                前往市場出售
+              </Link>
+            </p>
           </Panel>
         )}
       </div>

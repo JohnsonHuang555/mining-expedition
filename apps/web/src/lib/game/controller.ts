@@ -337,6 +337,16 @@ export class GameController {
     return r === LOCK_TIMEOUT ? "locked" : r;
   }
 
+  /**
+   * 重新讀取市場報價與歷史（唯讀 game-state，不結算、不送出交易）。
+   * 用於開啟市場頁面時取得歷史、以及本機時間超過 nextRefreshAt（可能換日）時取得新報價。
+   * 只是顯示：成交價與市場日的合法性一律由伺服器在交易時判斷。
+   */
+  refreshMarket(): Promise<void> {
+    if (this.disposed || this.op || this.state.phase !== "ready") return Promise.resolve();
+    return this.exclusive("refresh", () => this.doRefresh()).then(() => this.schedule());
+  }
+
   claimReport(): Promise<boolean> {
     const report = this.state.view?.state.pendingOfflineReport;
     if (!report) return Promise.resolve(false);
@@ -384,8 +394,8 @@ export class GameController {
     const before = this.state.view?.state.stateVersion ?? -1;
     const r = await this.api.action(action.command, action.requestId);
     if (this.disposed) return "uncertain"; // 已登出 / 換帳號：不寫入任何畫面狀態；未確認操作留在該使用者的 storage
-    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = [], synced = false) =>
-      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, synced, events, at: Date.now() } });
+    const result = (outcome: "ok" | "rejected" | "uncertain", message: string | null, events: ActionEvents = [], synced = false, code: string | null = null) =>
+      this.set({ lastAction: { requestId: action.requestId, command: action.command.type, outcome, message, code, synced, events, at: Date.now() } });
     const resolved = () => {
       this.pendingStore.remove(action.requestId);
       this.refreshPending();
@@ -405,14 +415,14 @@ export class GameController {
       }
       this.handleFailure(r, "reconcile");
       this.set({ notice: messageFor("UNCERTAIN") });
-      result("uncertain", messageFor("UNCERTAIN"));
+      result("uncertain", messageFor("UNCERTAIN"), [], false, r.code);
       return "uncertain";
     }
     // 伺服器確定的拒絕（已保存在 action_log 的回應）：交易本身沒有執行，可以清除。
     // 但操作前的結算可能已經提交（stateVersion 前進）：挖掘進度 / 在線獎勵 / 離線報告仍可能已同步
     resolved();
     const synced = r.body?.stateVersion !== undefined && r.body.stateVersion > before;
-    result("rejected", messageFor(r.code, r.message), [], synced);
+    result("rejected", messageFor(r.code, r.message), [], synced, r.code);
     if (r.code === "REPORT_ALREADY_CLAIMED" || r.code === "REPORT_NOT_FOUND") {
       this.set({ notice: messageFor("REPORT_ALREADY_CLAIMED") });
       await this.doRefresh();

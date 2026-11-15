@@ -1,10 +1,12 @@
 "use client";
 
-import { MATERIALS, type MaterialId } from "@mining/game-data";
+import { MATERIALS, type MaterialId, SETS } from "@mining/game-data";
 import { useEffect, useState } from "react";
 import { coins, itemName, pickaxeName, zoneName } from "@/lib/game/format";
 import type { ActionResult } from "@/lib/game/store";
 import { useGame } from "./runtime-context";
+
+const setName = (id: string) => (SETS as Record<string, { name: string }>)[id]?.name ?? id;
 
 /** 伺服器確認的結果 → 玩家看得懂的文字（金額等數值一律取自伺服器事件） */
 export function describeAction(a: ActionResult): string {
@@ -16,6 +18,12 @@ export function describeAction(a: ActionResult): string {
     switch (e.type) {
       case "items_sold":
         parts.push(`已出售 ${itemName(e.itemId)} ×${e.quantity}，獲得 ${coins(e.coins)} 金幣`);
+        break;
+      case "artifacts_sold":
+        parts.push(`已出售寶物 ${e.instanceIds.length} 件，成交 ${coins(e.coins)} 金幣`);
+        break;
+      case "set_changed":
+        if (!e.active) parts.push(`${setName(e.setId)}效果已失效`);
         break;
       case "pickaxe_purchased":
         parts.push(`購買了 ${pickaxeName(e.pickaxeId)}`);
