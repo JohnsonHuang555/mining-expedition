@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { type Page, expect, test } from "@playwright/test";
 import pg from "pg";
+import { closeReveals } from "./reveal-helpers";
 
 const pool = new pg.Pool({ connectionString: process.env.SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres", max: 2 });
 test.afterAll(async () => pool.end());
@@ -44,6 +45,7 @@ test("圖鑑與套組：挖到寶物 → 圖鑑更新 → 集齊套組 → 加�
   expect((await pool.query(`select count(*)::int as n from public.artifact_discoveries where player_id = $1`, [id])).rows[0].n).toBe(0);
   await dialog.getByRole("button", { name: "領取探險成果" }).click();
   await expect(dialog).toBeHidden();
+  await closeReveals(page);
   const found = (await pool.query<{ n: number }>(`select count(*)::int as n from public.artifact_discoveries where player_id = $1`, [id])).rows[0]!.n;
   await expect(page.getByTestId("collection-overall")).toContainText(`${found} / 12`);
   await shot(page, "11-collection");

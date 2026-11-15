@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { type Page, expect, test } from "@playwright/test";
 import pg from "pg";
+import { closeReveals } from "./reveal-helpers";
 
 const pool = new pg.Pool({ connectionString: process.env.SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres", max: 2 });
 test.afterAll(async () => pool.end());
@@ -84,6 +85,7 @@ test("註冊 → 建立角色 → 挖礦主畫面 → 同步 → Session 恢復 
   await expect(page.getByRole("button", { name: "立即同步" })).toHaveCount(0); // 主畫面被報告覆蓋（aria-hidden）
   await dialog.getByRole("button", { name: "領取探險成果" }).click();
   await expect(dialog).toBeHidden();
+  await closeReveals(page);
   const coins = Number((await page.getByTestId("coins").textContent())!.replace(/[^\d]/g, ""));
   expect(coins).toBeGreaterThanOrEqual(reward);
   const db = await pool.query<{ n: number }>(`select count(*)::int as n from public.offline_reports where player_id = $1 and status = 'claimed'`, [id]);
