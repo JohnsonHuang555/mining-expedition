@@ -4,7 +4,7 @@
   "type": "module",
   "packageManager": "pnpm@10.34.9",
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=22.18.0 <23"
   },
   "scripts": {
     "dev": "pnpm --filter @mining/web dev",

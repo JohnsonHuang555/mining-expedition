@@ -1,0 +1,144 @@
+# 《挖礦探險隊》Operations Runbook（Staging）
+
+**Version 1.0（PR #16）** — 日常檢查、監控、備份還原、回滾與常見故障。
+所有 SQL 都是唯讀（`begin read only … rollback`），除非標示「會修改」。連線字串放在密碼管理器或 GitHub secret，不要貼到任何地方。
+
+---
+
+## 1. 每日 / 每次部署後的檢查
+
+```sh
+psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/ops/verify-staging.sql   # 結構、權限、排程（不符合就失敗）
+psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql             # 排程結果、積壓、市場、連線
+```
+
+| 指標 | 正常 | 異常時 |
+|---|---|---|
+| `market-daily-prices` 最近 24 小時 | 1 次 succeeded | §4.1 |
+| `action-log-compact` 最近 24 小時 | 約 24 次 succeeded；`max_seconds` 遠小於 1 小時 | §4.2 |
+| `private.action_log_backlog()` | `settleToDelete`、`responsesToCompact` 接近 0；`oldestPending` 為 null 或不到 2 小時前 | §4.2 |
+| 今天的市場價格 | 12 筆 | §4.1 |
+| 連線數 | 遠低於方案上限（Dashboard → Database → Connections） | §6 |
+
+## 2. 監控（以平台內建功能為主）
+
+| 項目 | 來源 | 怎麼看 |
+|---|---|---|
+| Edge Function 4xx / 5xx、延遲 | Supabase Dashboard → Edge Functions → 函式 → **Invocations / Logs**（status、執行時間） | 依 status 篩選；P50 / P95 以平台實際提供的圖表為準 |
+| `SERVER_BUSY`、`RATE_LIMITED`、`MARKET_UNAVAILABLE`、`REQUEST_EXPIRED`、`db_error`、RPC 逾時 | Edge Function **Logs**（結構化 JSON：`event`、`code`、`status`、`requestId`、`command`、`durationMs`） | 搜尋 `request_failed`、`request_rejected`、`rate_limited`、`db_error`、`market_unavailable`、`request_expired`；逾時為 `db_error` 且訊息含 `timed out` |
+| Auth 失敗 | Dashboard → Authentication → **Logs**；Edge 401（`UNAUTHORIZED`）在 Invocations | 401 激增 → 可能是 token 過期或惡意 JWT |
+| Cron 失敗 / 耗時 | `cron.job_run_details`（`ops-report.sql`） | `status <> 'succeeded'`、`max_seconds` |
+| Action Log 積壓 | `select private.action_log_backlog();` | 見 §1 |
+| 前端錯誤、Web Vitals | Vercel Dashboard → Deployments → Logs / Speed Insights（依方案） | |
+
+**限制（如實記錄）**
+
+- Supabase Free 方案的 API / Database log 只保留 1 天，且沒有 Log Drain 與 Metrics endpoint；長期統計需要升級方案或自行彙整。
+- 本專案沒有實作自訂告警服務；Dashboard 內建告警的可用性依方案而定。
+- 本文件沒有任何實測的延遲或錯誤率數字；實測結果記錄在 PR 與 `docs/CLOUD_SMOKE_TEST.md` 的結果表。
+
+**低成本替代方案（尚未啟用，需要另外授權）**
+
+- GitHub Actions 排程（例如每小時）執行 `ops-report.sql`，失敗時 GitHub 會寄送通知。需要一個**唯讀**的資料庫角色（避免把有寫入權限的連線字串放進排程），建立角色需要另開 PR 與擁有者授權。
+- Smoke test 的 `SMOKE_LATENCY` 輸出（每次部署的少量樣本）作為延遲的粗略趨勢，不代表負載下的表現。
+
+## 3. 錯誤碼與處理
+
+見 `docs/SECURITY_RELIABILITY.md` §5 與 `TECHNICAL_SPEC.md` §10.11。運維重點：
+
+| 現象 | 先看 | 可能原因 |
+|---|---|---|
+| 大量 `SERVER_BUSY` / 逾時 | Edge Logs 的 `db_error`；Dashboard 的 DB CPU / 連線 | 資料庫負載、鎖等待、連線耗盡 |
+| 大量 `RATE_LIMITED` | 是否集中在少數使用者 | 自動化腳本 / 多分頁異常；必要時調整 `GAME_RATE_LIMIT_*`（Edge secret） |
+| `MARKET_UNAVAILABLE` | `ops-report.sql` 的市場段落、cron 失敗訊息 | `private.market_secret` 遺失、`market_ensure` 錯誤 |
+| `REQUEST_EXPIRED` | 正常（舊的未確認操作或已壓縮的紀錄） | 若異常大量：Client 時間錯誤或舊版前端 |
+| 401 激增 | Auth Logs | token 過期 / 被撤銷、惡意 JWT |
+| 空回應 5xx（沒有 JSON） | Edge Invocations | Edge Runtime 暫時錯誤（Supabase Local 曾發生；Cloud 是否發生需要實測） |
+
+## 4. 排程
+
+### 4.1 Market Daily Prices
+
+- 檢查：`select jobname, schedule, active from cron.job where jobname = 'market-daily-prices';`（每天 UTC 16:01 = 台灣 00:01）。
+- 補產（會修改，但冪等；只產生缺少的日期，既有價格不變）：`select private.market_ensure(private.market_date(now()));`
+- 排程遺漏也不影響正確性：第一個讀取或交易請求會在同一個交易內產生當日價格。
+- 一般玩家無法觸發或重新抽價：`market_ensure` 只有 postgres 可以執行（`verify-staging.sql` 檢查權限）。
+
+### 4.2 Action Log Compaction
+
+- 排程：每小時第 17 分 `call private.action_log_drain(interval '30 days')`；每批 2,000 列、最多 500 批、每批 commit。
+- 檢查耗時與失敗：`ops-report.sql` 的 cron 段落。
+- 積壓持續增加時：
+  1. 確認 job 為 active、最近的 `return_message`。
+  2. 若單次執行接近 1 小時或與其他工作互相影響：**不要直接加大批次**；先在離峰時段手動執行較小的批次（會修改）：`call private.action_log_drain(interval '30 days', 1000, 100);`，觀察 DB CPU 與鎖等待，再調整排程（另開 PR）。
+  3. 永久的冪等識別（settle 以外）不會被刪除；不要手動 `delete from public.action_log`。
+
+## 5. Backup / Restore
+
+### 5.1 方案能力（2026-11 查詢，以 Supabase 官方頁面為準）
+
+| 方案 | 每日備份 | PITR |
+|---|---|---|
+| Free | 官方建議自行以 `supabase db dump` 匯出並保存在其他地方 | 無 |
+| Pro | 可存取最近 7 天 | 付費加購 |
+| Team / Enterprise | 14 天 / 最多 30 天 | 付費加購 |
+
+注意：每日備份不包含自訂角色的密碼；Dashboard 的還原會覆蓋**同一個專案**，所以演練時要還原到另一個專案（下方的邏輯備份流程）。
+
+### 5.2 邏輯備份（所有方案適用）
+
+```sh
+# 需要：Supabase CLI 已登入、已 link 到 Staging（guard 通過）。輸出檔含玩家資料與密鑰：只存放在加密的位置，不提交 Git
+supabase db dump --linked -f staging_roles.sql --role-only
+supabase db dump --linked -f staging_schema.sql
+supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema public,private,supabase_migrations
+```
+
+必須包含並在還原後檢查：
+
+| 資料 | 位置 |
+|---|---|
+| 玩家狀態、裝備、背包 | `public.players`、`player_pickaxes`、`player_inventory` |
+| 寶物實例、圖鑑、首次保護 | `public.artifact_instances`、`artifact_discoveries`、`first_treasure` |
+| 離線報告 | `public.offline_reports` |
+| 冪等紀錄 | `public.action_log` |
+| 市場價格歷史 | `public.market_prices` |
+| 密鑰 | `private.player_secrets`、`private.market_secret` |
+| Migration history | `supabase_migrations.schema_migrations` |
+| 使用者帳號 | `auth.users`（`supabase db dump` 預設不含 auth schema；需要時另外以 `--schema auth` 匯出，並評估個資處理） |
+
+### 5.3 還原演練（只在可拋棄的隔離專案）
+
+1. 建立新的 Supabase 專案 `mining-expedition-restore-drill`（**不是** Staging；guard 的 `STAGING_PROJECT_REF` 不指向它）。
+2. 依序還原：roles → schema → data（`psql "$DRILL_DB_URL" -v ON_ERROR_STOP=1 -f ...`）。
+3. 驗證：
+   - `verify-staging.sql` 通過（cron job 需要重新建立：還原 schema 不會自動建立 pg_cron job，需比對 `cron.job`）。
+   - 玩家資產一致：抽樣比對 `players.coins`、`artifact_instances` 數量、`offline_reports` 狀態與備份前的查詢結果。
+   - **冪等性**：從 `action_log` 取一筆已提交的交易，以同一個 player 的同一個 `idempotency_key` 呼叫 `game_load_snapshot(player, key, request_hash)` → 必須是 `replay` 或 `expired`，不可是 `ok`（即不會重新執行）。
+   - 市場：`market_secret` 相同 → 下一個市場日的價格與原環境產生的一致。
+4. 演練結束後刪除專案。
+
+**狀態**：尚未執行（需要建立隔離專案與授權）→ 驗收為 **Blocked**。
+
+## 6. Rollback
+
+| 層 | 方式 |
+|---|---|
+| Web（Vercel） | 在 main 上 revert 有問題的 PR → 重新執行 Staging deploy（`staging` 分支以 fast-forward 前進到 revert commit；Web 與 Edge 同一版本）。**不要**使用 Vercel 的「Promote to Production」（會變成 Production 部署），也不要 force push `staging`。緊急時可在 Vercel 對 `staging` 的上一個部署按 Redeploy，但 `/api/version` 會與 Edge 不一致，之後必須補上 revert + workflow |
+| Edge Functions | 以上一個 commit 重新執行 Staging deploy（只勾選 deploy functions），或本機 `git checkout <commit> && supabase functions deploy ... --project-ref <staging>`（先跑 guard） |
+| 資料庫 | 只能往前修正（新 migration）。PR #15 的壓縮執行後不可回滾到舊版函式（`docs/SECURITY_RELIABILITY.md` §3.5）；必要時先 `select cron.unschedule('action-log-compact');`（會修改） |
+| 資料錯誤 | 從備份還原到隔離專案 → 比對 → 決定修正方式；**不要在 Staging / Production 使用 `supabase db reset`** |
+
+## 7. 常見故障
+
+| 症狀 | 檢查 | 處理 |
+|---|---|---|
+| Vercel build 找不到 `@mining/*` | Root Directory 是否為 `apps/web`、「Include files outside the root directory」是否開啟 | 開啟後重新部署 |
+| 瀏覽器 CORS 錯誤 | Edge secret `GAME_API_ALLOWED_ORIGIN` 是否等於 `staging` 的 Branch URL origin（Cloud 上沒有設定時會拒絕所有 origin；Edge log 有 `cors_not_configured`） | 更正 GitHub variable `STAGING_ALLOWED_ORIGINS` 後重新執行 workflow |
+| 登入後立刻被登出 | Auth Logs；Site URL / Redirect URLs | 補上 `staging` 的 Branch URL |
+| workflow 卡在「Wait for the Vercel staging build」 | Vercel → Deployments：`staging` 的建置是否失敗、是否被 Ignored Build Step 略過（log 顯示 `skip:`）、`STAGING_WEB_URL` 是否為 Branch URL | 修正後重新執行（只勾選 deploy web） |
+| main 出現 Vercel Production 部署 | `apps/web/vercel.json` 的 `ignoreCommand` 是否被後台覆寫、是否設定了 `MINING_ALLOW_PRODUCTION_BUILD` | 恢復設定；這個 PR 不部署 Production |
+| 註冊顯示「封閉測試」 | 預期行為（`NEXT_PUBLIC_SIGNUP_ENABLED=false` 與 Auth 關閉註冊） | 以 Dashboard 建立 / 邀請帳號 |
+| `verify-staging.sql` 失敗 | 錯誤訊息列出每一項 | 依項目修正（權限 / cron / 索引）；不要手動改 schema，改用 migration |
+| cron job 不存在 | `pg_cron` 是否在 migration 之前啟用 | 啟用後重新套用排程（另開 migration 或依 migration 中的 `cron.schedule` 指令手動建立，並記錄） |
+| Free 專案被暫停 | Dashboard 顯示 Paused | Restore；長期測試建議 Pro |

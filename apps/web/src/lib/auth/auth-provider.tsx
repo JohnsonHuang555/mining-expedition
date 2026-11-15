@@ -35,6 +35,8 @@ export function authMessage(code: string | undefined, fallback: string): string 
       return "嘗試次數太多，請稍後再試";
     case "email_not_confirmed":
       return "請先完成 Email 驗證";
+    case "signup_disabled":
+      return "目前為封閉測試，暫不開放註冊；請使用受邀的測試帳號登入";
     default:
       return fallback;
   }
