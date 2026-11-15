@@ -487,7 +487,8 @@ export class GameController {
         for (const id of e.artifactInstanceIds) {
           const a = fromReport.find((x) => x.instanceId === id) ?? state.heldArtifacts.find((x) => x.instanceId === id);
           if (!a) continue;
-          const isNew = "isNewDiscovery" in a ? (a as { isNewDiscovery: boolean }).isNewDiscovery : state.discoveredArtifacts[a.artifactId]?.firstDiscoveredAt === a.obtainedAt;
+          // 報告明確標示時才顯示 NEW DISCOVERY；改用持有清單時無法證明是首次 → 中性（不標示）
+          const isNew = "isNewDiscovery" in a ? (a as { isNewDiscovery: boolean }).isNewDiscovery === true : false;
           items.push({ key: a.instanceId, digCounter: a.digCounter, artifactId: a.artifactId, rarity: ARTIFACTS[a.artifactId].rarity, isNewDiscovery: isNew, protection: a.source === "first_treasure_protection", origin: "offline" });
         }
       }
@@ -514,7 +515,7 @@ export class GameController {
       digCounter: a.digCounter,
       artifactId: a.artifactId,
       rarity: ARTIFACTS[a.artifactId].rarity,
-      isNewDiscovery: state.discoveredArtifacts[a.artifactId]?.firstDiscoveredAt === a.obtainedAt,
+      isNewDiscovery: false, // 沒有事件：無法證明是首次發現 → 不標示（只有事件 / 報告明確標示時才顯示）
       protection: a.source === "first_treasure_protection",
       origin: a.obtainedAt < state.lastSettledAt - 300_000 ? "offline" : "online",
     }));

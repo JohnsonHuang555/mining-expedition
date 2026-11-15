@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { RevealOverlay } from "@/components/game/RevealOverlay";
 import { RuntimeContext } from "@/components/game/runtime-context";
 import { MemoryBackend } from "@/lib/game/dev/memory-backend";
-import { type RevealItem, RevealQueue, SEEN_LIMIT, memoryRevealPersistence } from "@/lib/game/reveal";
+import { type RevealItem, RevealQueue, SEEN_LIMIT, browserRevealStore, legacyRevealKey, memoryRevealStore, revealNamespace } from "@/lib/game/reveal";
 import type { GameRuntime } from "@/lib/game/runtime";
 import { flush, rig } from "./helpers";
 import { findSecret, firstBlockDrops, nearlyDone, toBase64 } from "./support/rig-drops";
@@ -36,7 +36,7 @@ describe("RevealQueue（去重與保存）", () => {
   });
 
   it("看完 / 全部略過後不會再入列（Replay）；重新開啟（同一份保存）佇列與紀錄都還在", () => {
-    const store = memoryRevealPersistence();
+    const store = memoryRevealStore();
     const a = new RevealQueue(store);
     a.enqueue([item(1), item(2), item(3)]);
     a.dismiss("d1");
@@ -49,7 +49,7 @@ describe("RevealQueue（去重與保存）", () => {
   });
 
   it("多分頁共用：A 入列後 B 不會重複入列；任一分頁略過，兩邊都移除", () => {
-    const shared = memoryRevealPersistence();
+    const shared = memoryRevealStore();
     const a = new RevealQueue(shared);
     const b = new RevealQueue(shared);
     a.enqueue([item(5)]);
@@ -69,6 +69,135 @@ describe("RevealQueue（去重與保存）", () => {
     q.dismissAll();
     expect(q.enqueue([item(3)])).toBe(0); // 被淘汰（≤ floor）
     expect(q.enqueue([item(5000)])).toBe(1);
+  });
+});
+
+describe("RevealQueue：多分頁交錯讀寫（PR #12 Review P1-1）", () => {
+  it("兩個分頁同時入列不同實例：交錯寫入不會互相覆蓋", () => {
+    const shared = memoryRevealStore();
+    const a = new RevealQueue(shared);
+    const b = new RevealQueue(shared);
+    // A 已檢查完、正要寫入時，B 整個入列流程插進來
+    shared.beforeSet = () => void b.enqueue([item(7)]);
+    a.enqueue([item(5)]);
+    expect(a.items().map((i) => i.key)).toEqual(["d5", "d7"]);
+    expect(b.items().map((i) => i.key)).toEqual(["d5", "d7"]);
+  });
+
+  it("入列與略過競爭：B 以舊的判斷入列 X，期間 A 已入列並略過 X → X 不會回來，Replay 也不會", () => {
+    const shared = memoryRevealStore();
+    const a = new RevealQueue(shared);
+    const b = new RevealQueue(shared);
+    shared.beforeSet = () => {
+      a.enqueue([item(9)]);
+      a.dismiss("d9");
+    };
+    b.enqueue([item(9)]); // 已通過「未知」檢查後才寫入（晚到的寫入）
+    expect(a.items()).toEqual([]);
+    expect(b.items()).toEqual([]);
+    expect(b.enqueue([item(9)])).toBe(0);
+    expect(a.enqueue([item(9)])).toBe(0);
+  });
+
+  it("略過與另一個分頁入列其他實例交錯：已播放紀錄不遺失、新項目保留", () => {
+    const shared = memoryRevealStore();
+    const a = new RevealQueue(shared);
+    const b = new RevealQueue(shared);
+    a.enqueue([item(1), item(2)]);
+    shared.beforeSet = () => void b.enqueue([item(3)]);
+    a.dismiss("d1");
+    expect(b.items().map((i) => i.key)).toEqual(["d2", "d3"]);
+    expect(b.enqueue([item(1)])).toBe(0);
+  });
+
+  it("清理已播放紀錄時有另一個分頁晚到的舊入列：floor 先寫好 → 不重播", async () => {
+    const shared = memoryRevealStore();
+    const a = new RevealQueue(shared);
+    const b = new RevealQueue(shared);
+    for (let i = 0; i < SEEN_LIMIT + 10; i++) {
+      a.enqueue([item(i)]);
+      a.dismiss(`d${i}`);
+    }
+    await a.prune();
+    expect([...shared.data.keys()].filter((k) => k.startsWith("s:")).length).toBeLessThanOrEqual(SEEN_LIMIT);
+    shared.set("q:d3", JSON.stringify(item(3))); // 舊快照晚到
+    expect(b.items()).toEqual([]);
+    expect(b.enqueue([item(3)])).toBe(0);
+  });
+
+  it("不支援 Web Lock：不清理（保守），也不重播", async () => {
+    const shared = memoryRevealStore({ locks: false });
+    const q = new RevealQueue(shared);
+    for (let i = 0; i < SEEN_LIMIT + 10; i++) {
+      q.enqueue([item(i)]);
+      q.dismiss(`d${i}`);
+    }
+    await q.prune();
+    expect([...shared.data.keys()].filter((k) => k.startsWith("s:"))).toHaveLength(SEEN_LIMIT + 10);
+    expect(q.enqueue([item(0)])).toBe(0);
+  });
+
+  it("清理不會吃掉仍待播放、digCounter 較小的項目", async () => {
+    const shared = memoryRevealStore();
+    const q = new RevealQueue(shared);
+    q.enqueue([item(0)]); // 尚未播放
+    for (let i = 1; i <= SEEN_LIMIT + 10; i++) {
+      q.enqueue([item(i)]);
+      q.dismiss(`d${i}`);
+    }
+    await q.prune();
+    expect(q.items().map((i) => i.key)).toEqual(["d0"]);
+  });
+
+  it("瀏覽器儲存：每個實例一個 key；v1 舊資料遷移（待播放保留、已播放不重播）", () => {
+    localStorage.clear();
+    localStorage.setItem(legacyRevealKey("u1"), JSON.stringify({ queue: [item(8)], seen: [{ key: "d2", d: 2 }], floor: 1 }));
+    const q = new RevealQueue(browserRevealStore("u1"));
+    expect(localStorage.getItem(legacyRevealKey("u1"))).toBeNull();
+    expect(q.items().map((i) => i.key)).toEqual(["d8"]);
+    expect(q.enqueue([item(1), item(2)])).toBe(0);
+    expect(localStorage.getItem(`${revealNamespace("u1")}q:d8`)).not.toBeNull();
+    // 另一個分頁（同一個 localStorage）
+    const other = new RevealQueue(browserRevealStore("u1"));
+    other.dismiss("d8");
+    expect(q.items()).toEqual([]);
+    localStorage.clear();
+  });
+});
+
+describe("RevealQueue：大量待播放不截斷（PR #12 Review P1-2）", () => {
+  it("同一批 60 件：全部保留、依序；回傳實際加入數；同批重複去重", () => {
+    const q = new RevealQueue();
+    const batch = Array.from({ length: 60 }, (_, i) => item(100 - i));
+    expect(q.enqueue([...batch, item(41)])).toBe(60);
+    const keys = q.items().map((i) => i.key);
+    expect(keys).toHaveLength(60);
+    expect(keys[0]).toBe("d41");
+    expect(keys[59]).toBe("d100");
+  });
+
+  it("51 件；佇列已有 50 件再追加 10 件；重新整理後仍完整；全部略過後不重播", () => {
+    const shared = memoryRevealStore();
+    const a = new RevealQueue(shared);
+    expect(a.enqueue(Array.from({ length: 51 }, (_, i) => item(i)))).toBe(51);
+    a.dismiss("d50");
+    expect(a.items()).toHaveLength(50);
+    expect(a.enqueue(Array.from({ length: 10 }, (_, i) => item(200 + i)))).toBe(10);
+    const refreshed = new RevealQueue(shared);
+    expect(refreshed.items()).toHaveLength(60);
+    expect(refreshed.items()[0]!.key).toBe("d0");
+    refreshed.dismissAll();
+    expect(refreshed.items()).toEqual([]);
+    expect(new RevealQueue(shared).enqueue(Array.from({ length: 51 }, (_, i) => item(i)))).toBe(0);
+  });
+
+  it("儲存空間不足：該筆保留在本分頁記憶體仍會播放；略過後不重播", () => {
+    const q = new RevealQueue(memoryRevealStore({ quota: 5 }));
+    expect(q.enqueue(Array.from({ length: 10 }, (_, i) => item(i)))).toBe(10);
+    expect(q.items()).toHaveLength(10);
+    q.dismissAll();
+    expect(q.items()).toEqual([]);
+    expect(q.enqueue(Array.from({ length: 10 }, (_, i) => item(i)))).toBe(0);
   });
 });
 
@@ -109,6 +238,19 @@ describe("在線取得寶物 → 揭曉", () => {
     expect(r.store.getState().reveals).toHaveLength(1);
   });
 
+  it("沒有事件（其他分頁 / 裝置取得，以持有清單補上）：會揭曉，但不推斷 NEW DISCOVERY（PR #12 Review P2）", async () => {
+    const r = rig();
+    await r.controller.createCharacter(); // 基準
+    r.backend.mutate(r.userId, (s) => {
+      s.heldArtifacts.push({ instanceId: "d50", artifactId: "a_z1_map", obtainedAt: s.lastSettledAt, mode: "frontier", band: 0, frontierBlockIndex: 0, digCounter: 50, source: "drop" });
+      s.discoveredArtifacts.a_z1_map = { firstDiscoveredAt: s.lastSettledAt, firstBand: 0, totalFound: 1 }; // 時間戳相同也不當作首次的證明
+      s.mining.digCounter = Math.max(s.mining.digCounter, 51);
+    });
+    await r.controller.sync();
+    await flush();
+    expect(r.store.getState().reveals.find((i) => i.key === "d50")).toMatchObject({ artifactId: "a_z1_map", isNewDiscovery: false });
+  });
+
   it("首次寶物保護（在線）：專屬標記", async () => {
     const r = rig();
     await r.controller.createCharacter();
@@ -127,7 +269,7 @@ describe("在線取得寶物 → 揭曉", () => {
 
   it("重新整理後已看過的不重播；未看完的繼續播放", async () => {
     const backend = new MemoryBackend();
-    const persistence = memoryRevealPersistence();
+    const persistence = memoryRevealStore();
     const a = rig({ backend });
     await a.controller.createCharacter();
     backend.mutate(a.userId, (s) => {

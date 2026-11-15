@@ -714,7 +714,14 @@ interface GameUiState {
 | `report_claimed.artifactInstanceIds` + 領取前報告的 `rewards.artifacts` | `claim_report` 成功後（領取前不入列；報告已不在畫面時改用持有清單的實例資料） |
 | `heldArtifacts` 中新出現的實例（相對於第一次收到狀態時的最大 digCounter） | 沒有事件的情況：其他分頁 / 裝置取得、拒絕回應附帶的結算狀態、重新讀取 |
 
-**去重**：鍵是 `instanceId`（`d<digCounter>`，同一位玩家永不重複；同種寶物取得兩次是兩個鍵）。佇列與「已播放」紀錄依使用者保存在 `localStorage`（`mining-expedition:reveal:v1:<userId>`），多分頁共用；已播放紀錄最多 200 筆，被淘汰的以 floor（最大的被淘汰 digCounter）判定。重新整理時第一次收到的狀態只當基準，既有的寶物不重播；未看完的佇列繼續播放。Replay 的回應帶相同事件，以 instanceId 去重。去重只影響 UI，不影響入帳。
+**去重**：鍵是 `instanceId`（`d<digCounter>`，同一位玩家永不重複；同種寶物取得兩次是兩個鍵）。去重只影響 UI，不影響入帳。
+
+**保存（PR #12 Review 修正）**：依使用者、每個實例一個 `localStorage` key（`mining-expedition:reveal:v2:<userId>:q:<id>` 待播放、`…:s:<id>` 已播放、`…:floor`），不對單一 JSON 做 read-modify-write，多分頁同時入列 / 略過不會互相覆蓋。
+- 略過：先寫已播放、再刪待播放；讀取時**已播放優先**（晚到的舊入列會被清掉），所以入列與略過交錯時不會重播。
+- 待播放**不截斷**：全部保留到看完 / 略過；儲存空間不足的項目只保留在本分頁記憶體（仍會播放；略過後本分頁不重播）。
+- 已播放紀錄上限 200：在同帳號 Web Lock 內先提高 floor（只增不減）、再刪較舊的紀錄；仍有待播放項目 ≤ floor 時不清理；不支援 Web Lock 時不清理（保守）。
+- 重新整理時第一次收到的狀態只當基準，既有寶物不重播；未看完的佇列繼續播放。舊版 v1 資料會自動遷移。
+- NEW DISCOVERY 只在伺服器事件 / 報告明確標示時顯示；以持有清單補上的項目不推斷（中性）。
 
 ### 12.6 API Client 與錯誤處理【Playable MVP】
 

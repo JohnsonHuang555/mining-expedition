@@ -8,7 +8,7 @@ import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { afterAll, describe, expect, it } from "vitest";
 import { createGameApi } from "../../apps/web/src/lib/game/api.ts";
 import { GameController } from "../../apps/web/src/lib/game/controller.ts";
-import { RevealQueue, memoryRevealPersistence } from "../../apps/web/src/lib/game/reveal.ts";
+import { RevealQueue, memoryRevealStore } from "../../apps/web/src/lib/game/reveal.ts";
 import { createGameStore } from "../../apps/web/src/lib/game/store.ts";
 import { findSecret, firstBlockDrops, nearlyDone } from "../../apps/web/test/support/rig-drops.ts";
 import { PASSWORD, env, pool, realBackend } from "./src/backend.ts";
@@ -21,7 +21,7 @@ function memoryStorage() {
   return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v), removeItem: (k: string) => void m.delete(k) };
 }
 
-function tab(supabase: SupabaseClient, reveals = memoryRevealPersistence(), fetchImpl?: typeof fetch) {
+function tab(supabase: SupabaseClient, reveals = memoryRevealStore(), fetchImpl?: typeof fetch) {
   const store = createGameStore();
   const api = createGameApi({
     functionsUrl: env.functionsUrl,
@@ -101,7 +101,7 @@ describe("寶物揭曉（真實 Supabase Local）", () => {
       }
       return res;
     };
-    const t = tab(p.supabase, memoryRevealPersistence(), lossy);
+    const t = tab(p.supabase, memoryRevealStore(), lossy);
     await t.controller.bootstrap(); // bootstrap 的 settle：第一次回應遺失 → 重送 → replay
     expect(lost).toBe(1);
     expect(t.store.getState().reveals).toHaveLength(1);
@@ -124,7 +124,7 @@ describe("寶物揭曉（真實 Supabase Local）", () => {
     await setSecret(p.id, secret);
     await pool.query(`update public.players set created_at_ms = created_at_ms - $2, last_settled_at_ms = last_settled_at_ms - $2 where id = $1`, [p.id, 10 * 60_000]);
 
-    const persistence = memoryRevealPersistence(); // 同一個瀏覽器的 localStorage
+    const persistence = memoryRevealStore(); // 同一個瀏覽器的 localStorage
     const lossy: typeof fetch = async (input, init) => {
       const res = await fetch(input, init);
       if (String(init?.body).includes("claim_report")) throw new TypeError("response lost");
