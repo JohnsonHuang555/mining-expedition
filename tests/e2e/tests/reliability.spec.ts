@@ -73,7 +73,7 @@ test("交易結果不確定：伺服器已提交但回應遺失 → 顯示未確
   await shot(page, "22-uncertain");
   expect(keys.size).toBe(1);
   await page.unroute("**/functions/v1/game-action", lose);
-  await page.getByTestId("pending-action").getByRole("button", { name: "重新確認" }).click();
+  // 網路恢復：排程以同一個 Request ID 自動確認（也可以按「重新確認」；不需要玩家操作）
   await expect(page.getByTestId("pending-action")).toBeHidden({ timeout: 30_000 });
   expect(await sells(id)).toBe(1);
   const logged = await pool.query(`select idempotency_key::text as k from public.action_log where player_id = $1 and command = 'sell_items'`, [id]);
