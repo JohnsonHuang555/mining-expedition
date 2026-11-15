@@ -119,31 +119,65 @@ export function browserRevealStore(userId: string): RevealStore {
   return store;
 }
 
-/** v1（單一 JSON）→ v2（每個實例一個 key）。每一步都是冪等的單 key 寫入，多個分頁同時遷移也安全 */
-function migrateLegacy(store: RevealStore, userId: string): void {
-  let raw: string | null = null;
+/**
+ * v1（單一 JSON）→ v2（每個實例一個 key）。PR #12 Review P2：
+ * - 只有「所有必要資料都寫入成功」後才刪除 v1；任一寫入失敗（例如 QuotaExceeded）就保留 v1，下次啟動重試。
+ * - 每一步都是冪等的單 key 寫入：重複遷移（或多個分頁同時遷移）結果相同。
+ * - 順序：已播放紀錄 → floor → 待播放。已播放優先，所以重複遷移不會讓已看過（或遷移後才看完）的項目重播。
+ * - 無法解析的 v1 資料不刪除（不能判斷其中是否有合法的待播放項目）；個別不合法的項目略過，不影響其他合法項目。
+ * 回傳：done（已遷移並刪除 v1）/ none（沒有 v1）/ retry（保留 v1，之後重試）/ corrupt（保留 v1，無法解析）。
+ */
+export type LegacyMigration = "done" | "none" | "retry" | "corrupt";
+
+export function migrateLegacyReveals(store: RevealStore, legacy: { read(): string | null; remove(): void }): LegacyMigration {
+  let raw: string | null;
   try {
-    raw = typeof localStorage === "undefined" ? null : localStorage.getItem(legacyRevealKey(userId));
+    raw = legacy.read();
   } catch {
-    return;
+    return "retry";
   }
-  if (!raw) return;
+  if (raw === null) return "none";
+  let v: { queue?: unknown; seen?: unknown; floor?: unknown };
   try {
-    const v = JSON.parse(raw) as { queue?: unknown[]; seen?: { key?: unknown }[]; floor?: unknown };
-    for (const s of v.seen ?? []) if (typeof s?.key === "string" && digOf(s.key) >= 0) store.set(`s:${s.key}`, "1");
-    for (const i of v.queue ?? []) {
-      const item = validItem(i);
-      if (item && store.get(`s:${item.key}`) === null) store.set(`q:${item.key}`, JSON.stringify(item));
-    }
-    if (typeof v.floor === "number") raiseFloor(store, v.floor);
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "corrupt";
+    v = parsed as typeof v;
   } catch {
-    /* 損毀的舊資料：略過 */
+    return "corrupt";
   }
+  let ok = true;
+  const seen = Array.isArray(v.seen) ? v.seen : [];
+  for (const x of seen) {
+    const key = x && typeof x === "object" ? (x as { key?: unknown }).key : undefined;
+    if (typeof key !== "string" || digOf(key) < 0) continue;
+    if (store.get(`s:${key}`) === null && !store.set(`s:${key}`, "1")) ok = false;
+  }
+  if (typeof v.floor === "number" && Number.isSafeInteger(v.floor) && v.floor >= 0) {
+    if (!raiseFloor(store, v.floor)) ok = false;
+  }
+  const floor = readFloor(store);
+  const queue = Array.isArray(v.queue) ? v.queue : [];
+  for (const raw of queue) {
+    const item = validItem(raw);
+    if (!item) continue; // 不合法的單筆：略過（其他合法項目照常遷移）
+    if (item.digCounter <= floor || store.get(`s:${item.key}`) !== null || store.get(`q:${item.key}`) !== null) continue;
+    if (!store.set(`q:${item.key}`, JSON.stringify(item))) ok = false;
+  }
+  if (!ok) return "retry";
   try {
-    localStorage.removeItem(legacyRevealKey(userId));
+    legacy.remove();
   } catch {
-    /* ignore */
+    return "retry";
   }
+  return "done";
+}
+
+function migrateLegacy(store: RevealStore, userId: string): LegacyMigration {
+  const key = legacyRevealKey(userId);
+  return migrateLegacyReveals(store, {
+    read: () => (typeof localStorage === "undefined" ? null : localStorage.getItem(key)),
+    remove: () => localStorage.removeItem(key),
+  });
 }
 
 /** 測試用：記憶體版，可被多個 RevealQueue 共用（模擬同一個瀏覽器的多個分頁） */

@@ -242,7 +242,7 @@ describe("獎勵", () => {
       expect(s.firstTreasure.reportId).toBeNull();
       // 出售保護寶物後也不會再發放
       const lantern = s.heldArtifacts.find((a) => a.source === "first_treasure_protection");
-      if (lantern) s = ok(applyAction(s, { type: "sell_artifacts", instanceIds: [lantern.instanceId] }, { marketMultiplierPpm: { a_z1_lantern: 1_000_000 } })).state;
+      if (lantern) s = ok(applyAction(s, { type: "sell_artifacts", instanceIds: [lantern.instanceId], marketDate: "2026-11-16" }, { marketMultiplierPpm: { a_z1_lantern: 1_000_000 }, marketDate: "2026-11-16" })).state;
       s = ok(settle(s, { serverNow: s.lastSettledAt + 200_000, rng: r })).state;
     }
     expect(grants).toBe(1);

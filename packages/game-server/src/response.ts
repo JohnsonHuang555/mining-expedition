@@ -3,7 +3,7 @@
  * 只含公開資料：沒有 RNG 密鑰、沒有 SQL 或內部錯誤訊息。
  */
 
-import type { GameEvent, OfflineReport, PlayerStateView, SettleSummary } from "@mining/game-engine";
+import type { GameEvent, MarketQuote, OfflineReport, PlayerStateView, SettleSummary } from "@mining/game-engine";
 
 /** 引擎錯誤碼（TECHNICAL_SPEC §10.3）＋ 伺服器層錯誤碼 */
 export type ApiErrorCode =
@@ -16,6 +16,8 @@ export type ApiErrorCode =
   | "PREREQUISITE_MISSING"
   | "MAX_LEVEL"
   | "ZONE_LOCKED"
+  | "MARKET_QUOTE_EXPIRED" //  報價的市場日已過：以回應附上的新報價重新確認
+  | "MARKET_UNAVAILABLE" //    當日價格無法取得（暫時性，不保存；可用同一個 key 重試）
   | "CHARACTER_NOT_FOUND"
   | "CHARACTER_EXISTS"
   | "IDEMPOTENCY_MISMATCH"
@@ -38,6 +40,8 @@ export type ApiResponse =
       events: GameEvent[];
       settlement: SettleSummary | null;
       report: OfflineReport | null;
+      /** 交易當下的市場報價（唯讀；成交價由伺服器在交易時決定）。舊版保存的回應沒有這個欄位 */
+      market?: MarketQuote;
     }
   | {
       ok: false;
@@ -47,10 +51,11 @@ export type ApiResponse =
       /** 遊戲規則拒絕時附上目前的公開狀態（例如 REPORT_PENDING 時讓 Client 顯示報告） */
       state?: PlayerStateView;
       stateVersion?: number;
+      market?: MarketQuote;
     };
 
 /** 錯誤是否可以用同一個 Idempotency-Key 重試（這類回應不保存在 action_log） */
-export const RETRYABLE: ReadonlySet<ApiErrorCode> = new Set(["VERSION_CONFLICT", "SERVER_BUSY", "INTERNAL_ERROR"]);
+export const RETRYABLE: ReadonlySet<ApiErrorCode> = new Set(["VERSION_CONFLICT", "SERVER_BUSY", "INTERNAL_ERROR", "MARKET_UNAVAILABLE"]);
 
 /** 對應的 HTTP 狀態碼（Edge Function 使用） */
 export function httpStatus(r: ApiResponse): number {
@@ -63,9 +68,11 @@ export function httpStatus(r: ApiResponse): number {
       return 404;
     case "IDEMPOTENCY_MISMATCH":
     case "VERSION_CONFLICT":
+    case "MARKET_QUOTE_EXPIRED":
     case "CHARACTER_EXISTS":
       return 409;
     case "SERVER_BUSY":
+    case "MARKET_UNAVAILABLE":
       return 503;
     case "INTERNAL_ERROR":
       return 500;

@@ -5,7 +5,7 @@
  * 測試可以用其他實作（例如 PGlite）。
  */
 
-import type { OfflineReport, PlayerGameState } from "@mining/game-engine";
+import type { MarketQuote, OfflineReport, PlayerGameState } from "@mining/game-engine";
 import type { ApiResponse } from "./response.ts";
 
 export type CreateResult =
@@ -13,10 +13,16 @@ export type CreateResult =
   | { status: "no_auth_user" };
 
 export type LoadResult =
-  | { status: "ok"; state: unknown; rngSecret: string; serverNow: number; market: Record<string, number> }
+  | { status: "ok"; state: unknown; rngSecret: string; serverNow: number; market: MarketSnapshot }
   | { status: "replay"; response: ApiResponse }
   | { status: "mismatch" }
   | { status: "not_found" };
+
+/**
+ * 交易當下的市場（同一個資料庫交易內、與 serverNow 同一個時間點決定）。
+ * multipliersPpm 缺少的寶物 = 當日價格無法產生（例如密鑰遺失）；只影響寶物出售，其他操作照常。
+ */
+export type MarketSnapshot = Required<Pick<MarketQuote, "date" | "nextRefreshAt" | "multipliersPpm">> & Pick<MarketQuote, "history">;
 
 export interface CommitArgs {
   playerId: string;

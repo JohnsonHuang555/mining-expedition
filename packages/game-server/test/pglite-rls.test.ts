@@ -65,6 +65,7 @@ describe("RLS 與權限", () => {
   it("service_role 可以呼叫 RPC；authenticated 可以讀市場價格", async () => {
     const r = await env.asRole<{ r: { status: string } }>("service_role", null, "select public.game_load_snapshot($1, null, null) as r", [A]);
     expect(r[0]!.r.status).toBe("ok");
-    expect(await env.asRole("authenticated", A, "select * from public.market_prices")).toEqual([]);
+    // 讀取快照時產生當日價格（延遲生成）；authenticated 只能讀
+    expect(await env.asRole("authenticated", A, "select * from public.market_prices")).toHaveLength(12);
   });
 });

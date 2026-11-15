@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.14 | Market Backend & Daily Pricing：§6.3 市場亂數改為資料庫內密鑰（`private.market_secret`）與確定的整數演算法；§8.2 / §8.3 市場資料表、只新增、權限；§9 改為已實作（延遲生成 + pg_cron、並行、失敗處理、報價與成交價）；§10 回應加 `market`、`sell_artifacts` 必須帶 `marketDate`、新錯誤碼 `MARKET_QUOTE_EXPIRED` / `MARKET_UNAVAILABLE`；§12.10 寶物出售後端開放（UI 在 PR #14）。**倍率範圍、Step、均值回歸、基礎價值、掉落、RNG_VERSION 不變** |
 | v1.13 | Artifact Reveal：§12.5 改為已實作的揭曉系統（佇列、去重、在線 / 離線資料流）；§12.13 套組旗標改為 `allDiscovered`（圖鑑已發現全部成員）、確認未發現寶物的揭露規則。**遊戲規則、掉落、首次保護、結算與 RNG_VERSION 不變** |
 | v1.12 | Collection & Artifact Sets：新增 §12.13 圖鑑與套組畫面（`/collection`）、未發現寶物的揭露規則（待確認）；`browserPendingStore.list()` 先取 key 快照再驗證。**遊戲規則、數值、套組加成與 RNG_VERSION 不變** |
 | v1.11 | Client Hardening：§12.6 未確認操作改為每筆一個 key + Web Locks 跨分頁排隊、待領報告的未確認領取優先調和、拒絕回應的 `synced`；新增 §12.11 跨分頁失敗模式、§12.12 帳號切換的 401。**遊戲規則、數值與 RNG_VERSION 不變** |
@@ -282,10 +283,16 @@ RNG_VERSION 1 的精確定義（`packages/game-engine/src/rng/`）：
 ### 6.3 市場亂數
 
 ```
-digest = HMAC-SHA256( key = MARKET_SECRET, msg = "market:" + date + ":" + artifactId )
+digest = HMAC-SHA256( key = market secret, msg = "market:" + YYYY-MM-DD + ":" + artifactId )
+u      = digest 前 6 bytes（big-endian，48 bits）
+ε      = (u mod (2·Step + 1)) − Step                      // U(−Step, +Step)，ppm
+drift  = floor(35 × (1,000,000 − m(yesterday)) / 100)     // 0.35 × (1 − m)
+m      = clamp(m(yesterday) + drift + ε, Min, Max)         // GBS §13
 ```
 
-`MARKET_SECRET` 是 Edge Function 的環境變數。
+- 【v1.14】密鑰存在資料庫 `private.market_secret`（migration 以 `gen_random_bytes(32)` 產生，每個環境各自一份），與玩家的 `rng_secret` 相同保護：任何 API 角色（含 service_role）都讀不到。原規劃的 Edge Function 環境變數 `MARKET_SECRET` 不再使用：產生在資料庫內完成，pg_cron 不需要網路呼叫或額外的服務憑證。
+- SQL（`private.market_next_ppm`、`private.market_ensure`）與引擎參考實作 `packages/game-engine/src/market.ts` 逐位元一致（PGlite 與 Supabase Local 測試逐日比對）。
+- 沒有前一日紀錄時 m(yesterday) = 1,000,000（GBS 未定義初始值，**待確認**）。
 
 ---
 
@@ -426,7 +433,7 @@ market_prices（全域，依日期）
 | `first_treasure` | `player_id` | `status`、`effective_mining_ms`、`resolved_at_ms`、`artifact_instance_id`、`report_id` | trigger：只能從 pending 轉出一次，之後結果不可變（`report_id` 只能清除）；有效時間不可減少 |
 | `offline_reports` | `(player_id, report_id)` | `status`（pending / claimed）、`period_start_ms`、`period_end_ms`、`blocks_mined` ≥ 1（D23）、`coins`、`report jsonb`（完整 `OfflineReport`）、`claimed_at_ms` | 部分唯一索引 `(player_id) where status = 'pending'` |
 | `action_log` | `id` | `player_id`、`idempotency_key uuid`、`request_hash`（SHA-256 hex）、`command`、`committed`、`state_version_after`、`response jsonb` | `unique (player_id, idempotency_key)` |
-| `market_prices` | `(price_date, artifact_id)` | `multiplier_ppm` 700,000–1,500,000 | 每日排程在之後的 PR |
+| `market_prices` | `(price_date, artifact_id)` | `multiplier_ppm` 700,000–1,500,000 | 只新增：trigger 禁止 UPDATE / DELETE（v1.14） |
 
 ### 8.3 私有資料與權限
 
@@ -435,7 +442,8 @@ market_prices（全域，依日期）
 | `private.player_secrets`（`rng_secret bytea`，長度 32） | anon / authenticated / **service_role 都沒有權限**；`private` schema 不在 PostgREST 公開清單中。只有 `game_load_snapshot`（security definer）讀取；密鑰在 `game_create_player` 內以 `extensions.gen_random_bytes(32)` 產生，不經過應用程式 |
 | 玩家資料表（`players` 等 7 張） | authenticated：只有 SELECT，RLS `player_id = auth.uid()`；anon：沒有權限；任何 Client 都不能 INSERT / UPDATE / DELETE |
 | `action_log` | Client 沒有權限（回應快照只由 API 回傳） |
-| `market_prices` | authenticated：SELECT 全部 |
+| `market_prices` | authenticated：SELECT 全部（公開報價）；任何 Client 都不能寫入 |
+| `private.market_secret`、`private.market_*` 函式 | 沒有任何 API 角色可讀取 / 呼叫（含 service_role）；只由 `game_load_snapshot` 與 pg_cron（postgres）使用 |
 | RPC `game_create_player`、`game_load_snapshot`、`game_commit` | 只有 service_role 可以 EXECUTE（收回 Supabase 預設給 public / anon / authenticated 的權限） |
 | `private.*` 函式 | 沒有任何角色可直接呼叫 |
 
@@ -471,14 +479,20 @@ market_prices（全域，依日期）
 
 ---
 
-## 9. 寶物市場實作 【提案 T8】
+## 9. 寶物市場實作【v1.14 已實作】
 
-- 價格依 GBS §13 逐日遞推。
-- **延遲生成**：讀取價格時，若某日尚未生成，從最後一筆生成到今天，並 `insert ... on conflict do nothing`。
-- `pg_cron` 每日 Asia/Taipei 00:00（UTC 16:00）預先生成，作為優化；沒跑到也不影響正確性。
-- 出售寶物時，使用伺服器當下日期的倍率。
-
----
+| 項目 | 規則 |
+|---|---|
+| 市場日 | Asia/Taipei（固定 UTC+8，無日光節約）00:00 換日（GBS §13，提案 P24–P26）。只用資料庫 `now()`，不使用 Client 時間 |
+| 產生 | `private.market_ensure(date)`：每件寶物從最後一筆紀錄逐日遞推到指定日（中間缺少的日期全部補齊）；`insert … on conflict do nothing` |
+| 延遲生成 | `game_load_snapshot`（每個讀取 / 交易）在同一個交易中呼叫 `private.market_quote(now())`：當日 12 件都在就直接讀取（不取鎖）；缺少時才產生 |
+| 排程 | pg_cron `market-daily-prices`：每天 UTC 16:01（台灣 00:01）`select private.market_ensure(private.market_date(now()))`。只是優化，沒跑到也不影響正確性；重跑是冪等的 |
+| 並行 | 產生時取 `pg_advisory_xact_lock`，多個 Worker 依序執行；值只取決於密鑰與日期，主鍵 + do nothing 保證不覆蓋 |
+| 不可變 | 已產生的價格不能 UPDATE / DELETE（trigger；連 postgres 也不行），同一市場日、同一寶物永遠是同一個倍率 |
+| 失敗 | 產生失敗（例如密鑰遺失）只記 warning：其他操作照常，只有出售回 `MARKET_UNAVAILABLE`（503，不保存、可用同一個 key 重試）。**不使用任何備用倍率** |
+| 報價 | 每個回應附 `market`：`{ date, nextRefreshAt, multipliersPpm }`；`game-state` 另附最多 6 天 `history`（PR #14 的走勢；沒有資料就沒有） |
+| 成交價 | `sell_artifacts` 在伺服器交易時以**當下市場日**的倍率計算 `floor(BaseValue × multiplier)`。Client 只能帶 `marketDate`（看到的報價日期），不能帶價格或倍率；與伺服器市場日不同 → `MARKET_QUOTE_EXPIRED`（409，附新報價，不出售），玩家必須以新報價重新確認 |
+| 跨日邊界 | 市場日與 serverNow 來自同一個交易的 `now()`；成交以「載入快照」的時間點為準（之後的 CAS 提交只差毫秒） |
 
 ## 10. API
 
@@ -502,7 +516,7 @@ market_prices（全域，依日期）
 | `game-action` | `POST` | header `Idempotency-Key`；body 必須恰好是 `{ "command": GameCommand }` | 所有改變狀態的操作：`settle`、`claim_report`、`select_mining_mode`、`unlock_zone`、`purchase_pickaxe`、`equip_pickaxe`、`upgrade_pickaxe`、`craft`、`sell_items`、`sell_artifacts`。指令格式由引擎 `parseCommand` 嚴格驗證（不接受價格、深度、時間等欄位） |
 | （所有端點） | `OPTIONS` | — | CORS preflight；其他方法 `405` |
 
-原 v1.6 以前「一個動作一個端點」的規劃（`state-get`、`mining-settle`、`report-claim`、`pickaxe-buy`…）改為單一 `game-action` + 指令型別：驗證、冪等、CAS 重試與回應保存只需實作一次，指令集與引擎 `GameCommand` 一一對應。`market-get` 屬市場排程，不在本階段範圍。
+原 v1.6 以前「一個動作一個端點」的規劃（`state-get`、`mining-settle`、`report-claim`、`pickaxe-buy`…）改為單一 `game-action` + 指令型別：驗證、冪等、CAS 重試與回應保存只需實作一次，指令集與引擎 `GameCommand` 一一對應。市場報價不另設端點：每個回應附 `market`（v1.14），不需要額外輪詢。
 
 ### 10.3 錯誤碼
 
@@ -516,6 +530,8 @@ market_prices（全域，依日期）
 | `PREREQUISITE_MISSING` | 未擁有前一階十字鎬、礦區未到達等 |
 | `MAX_LEVEL` | 已達 Lv5 |
 | `ZONE_LOCKED` | 礦區未解鎖 |
+| `MARKET_QUOTE_EXPIRED` | 出售時帶的報價市場日已過（409；回應附新報價） |
+| `MARKET_UNAVAILABLE` | 當日市場價格無法取得（503；不保存，可用同一個 key 重試） |
 | `INVALID_REQUEST` | 參數錯誤 |
 | `IDEMPOTENCY_MISMATCH` | 同一個 key 對應不同內容 |
 | `VERSION_CONFLICT` | 重試三次後仍衝突 |
@@ -641,7 +657,7 @@ sequenceDiagram
 | 數量 | 只接受 Client 指定「要做什麼」，所有數量與結果由伺服器計算 |
 | 頻率 | 結算請求每位玩家最少間隔 2 秒 |
 | 名稱 | 長度、字元集與過濾規則：待確認 C-3 |
-| 密鑰 | `MARKET_SECRET`、service role key 只存在 Edge Function 環境變數 |
+| 密鑰 | service role key 只存在 Edge Function 環境變數；市場密鑰只存在資料庫 `private` schema（v1.14） |
 
 ---
 
@@ -764,7 +780,7 @@ interface GameUiState {
 |---|---|---|---|
 | 礦物 / 寶石 | 固定 `MINERALS[id].sellPrice × 數量` | 引擎 `sell_items` | ✅ 開放 |
 | 製作素材 | 不可出售（P16） | 引擎拒絕 | 只顯示 |
-| 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入）；缺少倍率時引擎回 `INVALID_REQUEST` | ❌ 不開放：每日價格排程尚未完成，Client 不假造倍率；留到市場與圖鑑階段 |
+| 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入，必要時延遲生成）；指令必須帶報價的 `marketDate`；缺少倍率時 `MARKET_UNAVAILABLE` | 後端 ✅（v1.14）；UI 在 PR #14 |
 
 ### 12.11 跨分頁交易與失敗模式【v1.11】
 
@@ -1043,7 +1059,7 @@ flowchart LR
 | 變數 | 位置 |
 |---|---|
 | `NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY` | Vercel |
-| `SUPABASE_SERVICE_ROLE_KEY`、`MARKET_SECRET` | Supabase Edge Function secrets |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase Edge Function secrets（市場密鑰在資料庫內產生，不需要設定） |
 
 ---
 

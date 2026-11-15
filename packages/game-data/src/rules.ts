@@ -46,3 +46,19 @@ export const MARKET_MULTIPLIER_RANGE_PPM = {
   epic: { min: 800_000, max: 1_300_000 },
   legendary: { min: 700_000, max: 1_500_000 },
 } as const;
+
+/**
+ * 每日倍率遞推（GBS §13）：m(today) = clamp(m(yesterday) + 0.35 × (1 − m(yesterday)) + ε, Min, Max)，ε ~ U(−Step, +Step)。
+ * 數值全部取自 GBS §13，本檔案只是轉成 ppm。
+ */
+export const MARKET_STEP_PPM = { epic: 120_000, legendary: 180_000 } as const;
+/** 均值回歸係數 0.35（GBS §13），以百分比表示 */
+export const MARKET_REVERSION_PERCENT = 35;
+/** 市場日：Asia/Taipei 00:00 更新（GBS §13，提案 P24–P26）。台灣沒有日光節約時間，固定 UTC+8 */
+export const MARKET_TIMEZONE = "Asia/Taipei";
+export const MARKET_UTC_OFFSET_MS = 8 * 60 * 60 * 1000;
+/**
+ * 第一個市場日的「前一日倍率」。GBS 沒有定義初始值（待確認）；採用 1.0（= GBS §20 模擬中寶物以 Base Value 出售的假設）。
+ * 只影響部署後第一天的起點，之後逐日遞推。
+ */
+export const MARKET_INITIAL_PPM = 1_000_000;

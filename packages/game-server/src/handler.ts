@@ -20,7 +20,7 @@ import {
   toPlayerView,
   validateState,
 } from "@mining/game-engine";
-import { type GameDb, GameDbError } from "./db.ts";
+import { type GameDb, GameDbError, type MarketSnapshot } from "./db.ts";
 import { base64ToBytes, bytesToHex, utf8 } from "./encoding.ts";
 import { type ApiErrorCode, type ApiResponse, RETRYABLE } from "./response.ts";
 
@@ -60,7 +60,12 @@ const fail = (requestId: string | null, command: string | null, code: ApiErrorCo
 /** 引擎錯誤中屬於「伺服器狀態異常」的：不保存、不回傳細節 */
 const SERVER_SIDE: ReadonlySet<GameError["code"]> = new Set(["INVALID_STATE", "RNG_VERSION_MISMATCH", "DATA_VERSION_UNSUPPORTED"]);
 
-function buildResponse(requestId: string, result: RequestResult): ApiResponse {
+/** 公開報價（行動回應只附當日；歷史只在 game-state 回應） */
+function quoteOf(m: MarketSnapshot, withHistory: boolean) {
+  return { date: m.date, nextRefreshAt: m.nextRefreshAt, multipliersPpm: m.multipliersPpm, ...(withHistory && m.history ? { history: m.history } : {}) };
+}
+
+function buildResponse(requestId: string, result: RequestResult, market: MarketSnapshot): ApiResponse {
   const state = result.commit?.state ?? result.state;
   const view = toPlayerView(state);
   if (result.ok) {
@@ -73,6 +78,7 @@ function buildResponse(requestId: string, result: RequestResult): ApiResponse {
       events: result.events,
       settlement: result.settlement,
       report: state.pendingOfflineReport,
+      market: quoteOf(market, false),
     };
   }
   return {
@@ -82,6 +88,7 @@ function buildResponse(requestId: string, result: RequestResult): ApiResponse {
     error: { code: result.error!.code as ApiErrorCode, message: result.error!.message },
     state: view,
     stateVersion: state.stateVersion,
+    market: quoteOf(market, false),
   };
 }
 
@@ -133,7 +140,8 @@ export async function handleGameRequest(
       const result = executeRequest(snap.state as PlayerGameState, { requestId, command }, {
         serverNow: snap.serverNow,
         rng: createBlockRng(base64ToBytes(snap.rngSecret)),
-        marketMultiplierPpm: snap.market,
+        marketMultiplierPpm: snap.market.multipliersPpm,
+        marketDate: snap.market.date,
       });
       if (!result.ok && result.error && SERVER_SIDE.has(result.error.code)) {
         log("server_state_error", { playerId: input.playerId, requestId, code: result.error.code, message: result.error.message });
@@ -144,7 +152,13 @@ export async function handleGameRequest(
         return out(fail(requestId, command.type, "SERVER_BUSY", "try again"), { attempts });
       }
 
-      const response = buildResponse(requestId, result);
+      if (!result.ok && result.error?.code === "MARKET_UNAVAILABLE") {
+        // 當日價格無法產生（排程與延遲生成都失敗）：不保存、不提交，Client 可用同一個 key 重試；不使用任何備用倍率
+        log("market_unavailable", { playerId: input.playerId, requestId, date: snap.market.date, message: result.error.message });
+        return out({ ...fail(requestId, command.type, "MARKET_UNAVAILABLE", "market prices are not available right now; try again"), market: quoteOf(snap.market, false) }, { attempts });
+      }
+
+      const response = buildResponse(requestId, result, snap.market);
       const c = await db.commit({
         playerId: input.playerId,
         expectedVersion: result.expectedStateVersion,
@@ -214,7 +228,17 @@ export async function readState(db: GameDb, playerId: string, options: HandleOpt
       return fail(null, "state", "INTERNAL_ERROR", "server state error");
     }
     const state = snap.state as PlayerGameState;
-    return { ok: true, requestId: "state", command: "state", stateVersion: state.stateVersion, state: toPlayerView(state), events: [], settlement: null, report: state.pendingOfflineReport };
+    return {
+      ok: true,
+      requestId: "state",
+      command: "state",
+      stateVersion: state.stateVersion,
+      state: toPlayerView(state),
+      events: [],
+      settlement: null,
+      report: state.pendingOfflineReport,
+      market: quoteOf(snap.market, true),
+    };
   } catch (e) {
     log("db_error", { playerId, op: "read", error: e instanceof Error ? e.message : String(e) });
     return fail(null, "state", "SERVER_BUSY", "try again");

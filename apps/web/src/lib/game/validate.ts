@@ -5,6 +5,8 @@
  * 所以不會產生額外的狀態副本。遊戲規則的不變式由伺服器負責；這裡只防止壞掉的 JSON 讓畫面崩潰。
  */
 
+import { ARTIFACT_IDS } from "@mining/game-data";
+import { isMarketDate } from "@mining/game-engine";
 import type { ApiResponse } from "@mining/game-server";
 
 type Obj = Record<string, unknown>;
@@ -79,6 +81,22 @@ function settlementIssue(s: unknown): string | null {
   return null;
 }
 
+const isMultiplierMap = (v: unknown): boolean =>
+  isObj(v) && Object.entries(v).every(([k, m]) => (ARTIFACT_IDS as readonly string[]).includes(k) && isInt(m) && (m as number) > 0);
+
+/** 市場報價（選填；舊版保存的回應沒有）。只能讀取，成交價由伺服器在交易時決定 */
+export function marketIssue(m: unknown): string | null {
+  if (m === undefined) return null;
+  if (!isObj(m) || !isMarketDate(m.date)) return "market.date";
+  if (!isNonNegInt(m.nextRefreshAt)) return "market.nextRefreshAt";
+  if (!isMultiplierMap(m.multipliersPpm)) return "market.multipliersPpm";
+  if (m.history !== undefined) {
+    if (!Array.isArray(m.history)) return "market.history";
+    for (const h of m.history) if (!isObj(h) || !isMarketDate(h.date) || !isMultiplierMap(h.multipliersPpm)) return "market.history[]";
+  }
+  return null;
+}
+
 /** 回傳第一個不合法的欄位路徑；合法時回傳 null（此時可以安全地當作 ApiResponse 使用） */
 export function apiResponseIssue(x: unknown): string | null {
   if (!isObj(x)) return "body";
@@ -89,12 +107,15 @@ export function apiResponseIssue(x: unknown): string | null {
     const vi = viewIssue(x.state);
     if (vi) return vi;
     if ((x.state as { state: { stateVersion: number } }).state.stateVersion !== x.stateVersion) return "stateVersion(mismatch)";
-    return eventsIssue(x.events) ?? settlementIssue(x.settlement) ?? reportIssue(x.report);
+    return eventsIssue(x.events) ?? settlementIssue(x.settlement) ?? reportIssue(x.report) ?? marketIssue(x.market);
   }
   const err = x.error;
   if (!isObj(err) || !isStr(err.code) || !isStr(err.message)) return "error";
-  if (x.state !== undefined) return viewIssue(x.state);
-  return null;
+  if (x.state !== undefined) {
+    const vi = viewIssue(x.state);
+    if (vi) return vi;
+  }
+  return marketIssue(x.market);
 }
 
 export function isApiResponse(x: unknown): x is ApiResponse {
