@@ -4,6 +4,7 @@ import { miningPosition } from "@mining/game-engine";
 import { useEffect, useState } from "react";
 import { CreateCharacter } from "@/components/game/CreateCharacter";
 import { GameFrame, MineContent } from "@/components/game/Dashboard";
+import { CollectionPage } from "@/components/game/CollectionPage";
 import { InventoryPage } from "@/components/game/InventoryPage";
 import { WorkshopPage } from "@/components/game/WorkshopPage";
 import { OfflineReportModal } from "@/components/game/OfflineReportModal";
@@ -15,7 +16,7 @@ import type { GameRuntime } from "@/lib/game/runtime";
 import { createGameStore } from "@/lib/game/store";
 
 const HOUR = 3_600_000;
-const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report", "economy"] as const;
+const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report", "economy", "collection"] as const;
 type Scene = (typeof SCENES)[number];
 
 async function build(scene: Scene): Promise<GameRuntime> {
@@ -50,6 +51,24 @@ async function build(scene: Scene): Promise<GameRuntime> {
         x.coins = 7_420;
       });
     if (scene === "report") backend.rewind(userId, 5 * HOUR + 17 * 60_000);
+    if (scene === "collection")
+      backend.mutate(userId, (x) => {
+        const add = (artifactId: string, i: number, n = 1) => {
+          for (let k = 0; k < n; k++) x.heldArtifacts.push({ instanceId: `d${100 + i * 10 + k}`, artifactId: artifactId as never, obtainedAt: x.createdAt, mode: "frontier", band: 3, frontierBlockIndex: 300 + i, digCounter: 100 + i * 10 + k, source: "drop" });
+        };
+        const found = (artifactId: string, total: number) => ((x.discoveredArtifacts as Record<string, unknown>)[artifactId] = { firstDiscoveredAt: x.createdAt - 86_400_000, firstBand: 3, totalFound: total });
+        add("a_z1_lantern", 0, 2);
+        add("a_z1_badge", 1);
+        add("a_z1_map", 2);
+        add("a_z2_orb", 3);
+        ["a_z1_lantern", "a_z1_badge", "a_z1_map", "a_z2_orb", "a_z2_crown", "a_z1_heart"].forEach((a, i) => found(a, a === "a_z1_lantern" ? 3 : 1 + (i % 2)));
+        x.mining.frontierBlockIndex = 1000;
+        x.mining.digCounter = 1200;
+        x.unlockedZone = 1;
+        x.pickaxes = { pick_wood: 5, pick_stone: 5, pick_iron: 2 };
+        x.equippedPickaxe = "pick_iron";
+        x.firstTreasure = { status: "obtained", effectiveMiningMs: 0, resolvedAt: x.createdAt, artifactInstanceId: "d100", reportId: null };
+      });
     if (scene === "economy")
       backend.mutate(userId, (x) => {
         x.coins = 1_860;
@@ -68,6 +87,7 @@ function Tab() {
   const tab = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("tab");
   if (tab === "inventory") return <InventoryPage />;
   if (tab === "workshop") return <WorkshopPage />;
+  if (tab === "collection") return <CollectionPage />;
   return <MineContent />;
 }
 

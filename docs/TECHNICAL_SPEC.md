@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.12 | Collection & Artifact Sets：新增 §12.13 圖鑑與套組畫面（`/collection`）、未發現寶物的揭露規則（待確認）；`browserPendingStore.list()` 先取 key 快照再驗證。**遊戲規則、數值、套組加成與 RNG_VERSION 不變** |
 | v1.11 | Client Hardening：§12.6 未確認操作改為每筆一個 key + Web Locks 跨分頁排隊、待領報告的未確認領取優先調和、拒絕回應的 `synced`；新增 §12.11 跨分頁失敗模式、§12.12 帳號切換的 401。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.10 | Inventory & Workshop：新增 §12.9 背包 / 工坊 / 製作畫面與路由（`/inventory`、`/workshop`，共用 `(game)` layout）、§12.10 出售價格來源。**遊戲規則、數值、成本、配方與 RNG_VERSION 不變** |
 | v1.9 | Client Reliability：§12.6 未確認操作（Request ID 持久化與調和）、回應結構驗證；新增 §12.8 Runtime 生命週期。**遊戲規則、數值與 RNG_VERSION 不變** |
@@ -774,6 +775,28 @@ interface GameUiState {
   - `getAccessToken`：目前 session 不是這個 userId → 不送出請求。
   - `refreshAccessToken` / `onUnauthorized`：只有目前 session 仍屬於這個 userId（且 runtime 未 dispose）時才更新或 `signOut({ scope: "local" })`。
 - 因此 A 帳號的舊請求晚收到 401，不會更新、登出或清除 B 的 session；A 的 Controller 已 dispose，不會寫入任何 store。
+
+### 12.13 圖鑑與套組【v1.12】
+
+資料模型（已存在，沒有新增欄位）：
+
+| 需要 | 來源 |
+|---|---|
+| 歷史圖鑑 | `PlayerGameState.discoveredArtifacts[id] = { firstDiscoveredAt, firstBand, totalFound }`（`artifact_discoveries`，永不刪除） |
+| 目前持有 | `heldArtifacts[]`（`artifact_instances`，出售時刪除） |
+| 稀有度 / 礦區 / 基礎估值 / 套組 | `@mining/game-data` `ARTIFACTS`（只有 Epic、Legendary 兩種稀有度，GBS §8.3） |
+| 套組成員與加成 | `SETS`（Speed %、Luck ppm）；是否啟動：引擎 `activeSets(heldCounts(state))`（D3：必須實際持有全部成員） |
+| 新發現事件 | `block_completed.isNewDiscovery`（在線）、`ReportArtifact.isNewDiscovery`（離線報告） |
+| 離線報告中的寶物 | `pendingOfflineReport.rewards.artifacts`（領取前不在 `heldArtifacts`，也不在圖鑑） |
+
+畫面（`lib/game/collection.ts` 為顯示用計算）：
+- 圖鑑進度 = 已發現種類 / 12（GBS §9、P19），另顯示三個礦區各 / 4。
+- 寶物卡：已發現（名稱、稀有度、礦區、持有數；持有 0 時標示「已發現，未持有」）／未發現（剪影 + `？？？`）。詳細：持有數、歷史發現次數、首次發現時間與深度、所屬套組、基礎估值（註明不是當日成交價）。
+- 篩選：狀態（全部 / 已發現 / 未發現）、礦區、稀有度；另有「套組」分頁。
+- 套組卡分開顯示三種狀態：曾經集齊（所有成員都在圖鑑）、目前持有全部成員、加成生效中；以及持有數 / 3、缺少的成員、完成加成（取自 `SETS`）。
+- 實際能力值只顯示伺服器回傳的 `PlayerStateView.stats`；UI 不把加成套用到任何狀態。
+
+**未發現寶物的揭露規則（GDD 未定義，待確認）**：目前顯示礦區與稀有度（GBS §8.3 的公開資料，也讓「礦區完成率」與稀有度篩選有意義），隱藏名稱、配色與套組歸屬；剪影保留輪廓。若希望連稀有度也隱藏，只需調整 `CollectionPage` 的顯示。
 
 ### 12.7 多分頁
 
