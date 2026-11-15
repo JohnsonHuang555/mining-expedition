@@ -2,34 +2,55 @@
 
 import { ZONES } from "@mining/game-data";
 import { type BlockPrediction, type PlayerStateView, bandOfBlock, requiredPower10OfBand, reworkBand, revisitableZones, revisitSpot, type ZoneIndex } from "@mining/game-engine";
-import { useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { type ReactNode, useState } from "react";
 import { Panel, PixelBar, PixelButton, Stat } from "@/components/ui/pixel";
 import { STATUS_LABEL, artifactName, artifactRarity, bandRange, coins, duration, formatStats, itemName, itemRarity, meters, pickaxeName, spotLabel, zoneName } from "@/lib/game/format";
 import { type LootEntry, canAct } from "@/lib/game/store";
+import { ActionToast } from "./ActionToast";
 import { MiningScene } from "./MiningScene";
 import { useController, useGame, usePrediction } from "./runtime-context";
 
-export function Dashboard({ email, onSignOut }: { email: string | null; onSignOut(): void }) {
+/** 所有遊戲頁面共用的外框：標題列、玩家資訊、操作結果提示、底部導覽 */
+export function GameFrame({ email, onSignOut, children }: { email: string | null; onSignOut(): void; children: ReactNode }) {
   const view = useGame((s) => s.view)!;
-  const prediction = usePrediction();
   const blocked = view.state.pendingOfflineReport !== null;
-
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-3 pb-24 sm:p-6" aria-hidden={blocked || undefined}>
       <TopBar email={email} onSignOut={onSignOut} />
       <PlayerStats view={view} />
-      <div className="grid gap-4 md:grid-cols-[1.4fr_1fr]">
-        <div className="flex flex-col gap-4">
-          <MiningPanel view={view} prediction={prediction} />
-          <ModePanel view={view} />
-        </div>
-        <div className="flex flex-col gap-4">
-          <LatestResult />
-          <RecentLoot />
-        </div>
-      </div>
+      <ActionToast />
+      {children}
       <BottomNav />
     </div>
+  );
+}
+
+/** 挖礦頁（Mine） */
+export function MineContent() {
+  const view = useGame((s) => s.view)!;
+  const prediction = usePrediction();
+  return (
+    <div className="grid gap-4 md:grid-cols-[1.4fr_1fr]">
+      <div className="flex flex-col gap-4">
+        <MiningPanel view={view} prediction={prediction} />
+        <ModePanel view={view} />
+      </div>
+      <div className="flex flex-col gap-4">
+        <LatestResult />
+        <RecentLoot />
+      </div>
+    </div>
+  );
+}
+
+/** 挖礦主畫面（外框 + 挖礦頁） */
+export function Dashboard({ email, onSignOut }: { email: string | null; onSignOut(): void }) {
+  return (
+    <GameFrame email={email} onSignOut={onSignOut}>
+      <MineContent />
+    </GameFrame>
   );
 }
 
@@ -154,7 +175,11 @@ function MiningPanel({ view, prediction }: { view: PlayerStateView; prediction: 
           {s.mining.mode === "frontier" ? (
             <>
               前方岩層太硬：需要 Power {(requiredPower10OfBand(bandOfBlock(s.mining.frontierBlockIndex)) / 10).toFixed(1)}，目前 {(view.stats.power10 / 10).toFixed(1)}。
-              可以切換到「重挖」或「回訪」繼續收集資源；十字鎬的購買與強化將在下一版開放。
+              可以切換到「重挖」或「回訪」繼續收集資源，再到
+              <Link href="/workshop" className="mx-1 underline">
+                工坊
+              </Link>
+              購買或強化十字鎬。
             </>
           ) : (
             <>這個位置需要更高的 Power。請切換回前線或其他模式。</>
@@ -341,30 +366,37 @@ function LatestResult() {
   );
 }
 
+const NAV = [
+  { href: "/", label: "Mine", sub: "挖礦" },
+  { href: "/inventory", label: "Inventory", sub: "背包" },
+  { href: "/workshop", label: "Workshop", sub: "工坊" },
+  { href: null, label: "Collection", sub: "圖鑑" },
+] as const;
+
 function BottomNav() {
-  const tabs = [
-    { label: "Mine", sub: "挖礦", on: true },
-    { label: "Inventory", sub: "背包", on: false },
-    { label: "Workshop", sub: "工坊", on: false },
-    { label: "Collection", sub: "圖鑑", on: false },
-  ];
+  const pathname = usePathname() ?? "/";
   return (
     <nav className="fixed inset-x-0 bottom-0 z-10 border-t-4 border-cave-600 bg-cave-900/95 backdrop-blur" aria-label="主要功能">
       <ul className="mx-auto grid max-w-5xl grid-cols-4">
-        {tabs.map((t) => (
-          <li key={t.label}>
-            <button
-              type="button"
-              disabled={!t.on}
-              aria-current={t.on ? "page" : undefined}
-              title={t.on ? undefined : "下一版開放"}
-              className={`flex w-full flex-col items-center py-2 text-xs ${t.on ? "text-gold" : "text-parchment-dim/50"}`}
-            >
-              <span className="font-bold">{t.sub}</span>
-              <span className="text-[10px]">{t.on ? t.label : "即將推出"}</span>
-            </button>
-          </li>
-        ))}
+        {NAV.map((t) => {
+          const current = t.href !== null && (t.href === "/" ? pathname === "/" : pathname.startsWith(t.href));
+          const cls = `flex w-full flex-col items-center py-2 text-xs ${current ? "text-gold" : t.href ? "text-parchment hover:text-gold" : "text-parchment-dim/50"}`;
+          return (
+            <li key={t.label}>
+              {t.href ? (
+                <Link href={t.href} aria-current={current ? "page" : undefined} className={cls}>
+                  <span className="font-bold">{t.sub}</span>
+                  <span className="text-[10px]">{t.label}</span>
+                </Link>
+              ) : (
+                <span className={cls} title="下一版開放" aria-disabled="true">
+                  <span className="font-bold">{t.sub}</span>
+                  <span className="text-[10px]">即將推出</span>
+                </span>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </nav>
   );

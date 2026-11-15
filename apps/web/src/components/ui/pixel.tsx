@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import type { ComponentPropsWithRef, ReactNode } from "react";
 
 export function Panel({ title, children, className = "", right }: { title?: ReactNode; children: ReactNode; className?: string; right?: ReactNode }) {
   return (
@@ -21,7 +21,7 @@ const TONES = {
   ghost: "bg-cave-700 text-parchment-dim hover:text-parchment",
 } as const;
 
-export function PixelButton({ tone = "primary", className = "", ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { tone?: keyof typeof TONES }) {
+export function PixelButton({ tone = "primary", className = "", ...rest }: ComponentPropsWithRef<"button"> & { tone?: keyof typeof TONES }) {
   return <button type="button" {...rest} className={`pixel-btn px-4 py-2 text-sm ${TONES[tone]} ${className}`} />;
 }
 

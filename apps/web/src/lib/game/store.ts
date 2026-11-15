@@ -20,6 +20,8 @@ export interface ActionResult {
   /** ok：伺服器確認成功；rejected：伺服器確認拒絕（沒有任何變更）；uncertain：結果未確認（保留，之後以同一個 requestId 調和） */
   outcome: "ok" | "rejected" | "uncertain";
   message: string | null;
+  /** 伺服器回傳的事件（成功時；例如 items_sold 的實際金幣） */
+  events: GameEvent[];
   at: number;
 }
 
