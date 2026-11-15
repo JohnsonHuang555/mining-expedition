@@ -22,7 +22,14 @@ async function api(fn: string, token: string, opts: { method?: string; key?: str
   const headers: Record<string, string> = { apikey: env.anonKey, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   if (opts.key) headers["Idempotency-Key"] = opts.key;
   const res = await fetch(`${env.functionsUrl}/${fn}`, { method: opts.method ?? "POST", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
-  return { status: res.status, replayed: res.headers.get("idempotent-replayed"), body: (await res.json()) as Body };
+  const text = await res.text();
+  let body: Body;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new Error(`${fn}: non-JSON response ${res.status}: ${text.slice(0, 200)}`); // gateway / runtime 錯誤時保留診斷資訊
+  }
+  return { status: res.status, replayed: res.headers.get("idempotent-replayed"), body };
 }
 const act = (token: string, command: Record<string, unknown>, key = randomUUID()) => api("game-action", token, { key, body: { command } });
 const state = (token: string) => api("game-state", token, { method: "GET" });
