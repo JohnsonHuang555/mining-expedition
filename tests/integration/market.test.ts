@@ -18,18 +18,28 @@ afterAll(async () => pool.end());
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Body = any;
+/**
+ * Edge Function 呼叫。Edge Runtime 在 CI 高負載時偶爾回傳沒有內容的 502 / 503 / 504（worker 連線中斷，不是遊戲邏輯的回應）：
+ * 與正式的 API Client 相同，以同一個 Idempotency-Key 重試（冪等，不會重複執行）。
+ */
 async function api(fn: string, token: string, opts: { method?: string; key?: string; body?: unknown } = {}) {
   const headers: Record<string, string> = { apikey: env.anonKey, Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
   if (opts.key) headers["Idempotency-Key"] = opts.key;
-  const res = await fetch(`${env.functionsUrl}/${fn}`, { method: opts.method ?? "POST", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
-  const text = await res.text();
-  let body: Body;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error(`${fn}: non-JSON response ${res.status}: ${text.slice(0, 200)}`); // gateway / runtime 錯誤時保留診斷資訊
+  for (let attempt = 1; ; attempt++) {
+    const res = await fetch(`${env.functionsUrl}/${fn}`, { method: opts.method ?? "POST", headers, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
+    const text = await res.text();
+    let body: Body;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      if ([502, 503, 504].includes(res.status) && attempt < 4) {
+        await new Promise((r) => setTimeout(r, 300 * attempt));
+        continue;
+      }
+      throw new Error(`${fn}: non-JSON response ${res.status}: ${text.slice(0, 200)}`);
+    }
+    return { status: res.status, replayed: res.headers.get("idempotent-replayed"), body };
   }
-  return { status: res.status, replayed: res.headers.get("idempotent-replayed"), body };
 }
 const act = (token: string, command: Record<string, unknown>, key = randomUUID()) => api("game-action", token, { key, body: { command } });
 const state = (token: string) => api("game-state", token, { method: "GET" });
