@@ -32,10 +32,15 @@ async function newPlayer(page: Page): Promise<{ email: string; id: string }> {
 async function loseResponses(target: Page | BrowserContext, command: string): Promise<() => Promise<void>> {
   const handler = async (route: Route) => {
     if (route.request().method() === "POST" && route.request().postData()?.includes(`"type":"${command}"`)) {
-      await route.fetch(); // 送到真正的 Edge Function（已提交）
-      return route.abort("connectionreset");
+      try {
+        await route.fetch(); // 送到真正的 Edge Function（已提交）
+        await route.abort("connectionreset");
+      } catch {
+        // 重新整理 / 關閉分頁時請求已被瀏覽器取消（route 已處理）：忽略
+      }
+      return;
     }
-    return route.fallback();
+    return route.fallback().catch(() => {});
   };
   await target.route("**/functions/v1/game-action", handler);
   return () => target.unroute("**/functions/v1/game-action", handler);
