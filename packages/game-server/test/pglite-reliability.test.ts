@@ -111,6 +111,36 @@ describe("Action Log 分層保存", () => {
     await expect(env.pg.query("select private.action_log_compact(interval '-1 day')")).rejects.toThrow(/negative/);
   });
 
+  it("積壓清除（Review P1）：> 5,000 筆過期 settle + > 5,000 筆過期交易 → 分批（每批 commit）清完；交易只壓縮、冪等鍵保留；有上限、下一次接續", async () => {
+    const id = await player();
+    const N = 6_000;
+    const seed = (command: string) =>
+      env.pg.query(
+        `insert into public.action_log (player_id, idempotency_key, request_hash, command, committed, state_version_after, response, created_at)
+         select $1::uuid, gen_random_uuid(), repeat('a', 64), $2::text, false, null, jsonb_build_object('ok', g % 2 = 0, 'command', $2::text), now() - interval '40 days'
+         from generate_series(1, $3::int) g`,
+        [id, command, N],
+      );
+    await seed("settle");
+    await seed("sell_items");
+    await handleGameRequest(env.db, { playerId: id, requestId: randomUUID(), command: { type: "settle" } }); // 期限內：不受影響
+    const backlog = async () => (await env.pg.query<{ b: { settleToDelete: number; responsesToCompact: number; oldestPending: string | null } }>("select private.action_log_backlog() as b")).rows[0]!.b;
+    expect(await backlog()).toMatchObject({ settleToDelete: N, responsesToCompact: N });
+    // 有上限的一次執行：3 批 × 1,000
+    await env.pg.exec("call private.action_log_drain(interval '30 days', 1000, 3)");
+    expect(await backlog()).toMatchObject({ settleToDelete: N - 3_000, responsesToCompact: N - 3_000 });
+    // 下一次（排程每小時）接續清完
+    await env.pg.exec("call private.action_log_drain(interval '30 days', 1000, 500)");
+    expect(await backlog()).toEqual({ settleToDelete: 0, responsesToCompact: 0, oldestPending: null });
+    const rows = (await env.pg.query<{ command: string; n: number; compacted: number; ok: number }>(
+      `select command, count(*)::int as n, count(*) filter (where response is null)::int as compacted, count(*) filter (where response_ok)::int as ok
+       from public.action_log where player_id = $1 group by command order by command`, [id])).rows;
+    expect(rows).toEqual([
+      { command: "sell_items", n: N, compacted: N, ok: N / 2 }, // 冪等鍵全部保留，成功與否記錄正確
+      { command: "settle", n: 1, compacted: 0, ok: 0 }, // 只剩期限內的那一筆（未壓縮：response 仍在，response_ok 只在壓縮時寫入）
+    ]);
+  });
+
   it("作廢探詢：未知的 key 不執行、寫下作廢紀錄；原始請求晚到也不執行；已處理的 key 回原本的結果", async () => {
     const id = await player(20);
     const key = randomUUID();
@@ -149,6 +179,19 @@ describe("Supabase 權限稽核（回歸測試）", () => {
         expect(f.authed, `${f.schema}.${f.name} authenticated`).toBe(false);
       }
       if (f.schema === "private") expect(f.service, `${f.schema}.${f.name} service_role`).toBe(false);
+    }
+    // 含 COMMIT 的 procedure 不能有 SET 子句：本體開頭必須清空 search_path，且不可被任何 API 角色執行
+    const procs = (await env.pg.query<{ name: string; src: string; anon: boolean; authed: boolean; service: boolean }>(`
+      select p.proname as name, p.prosrc as src,
+             has_function_privilege('anon', p.oid, 'execute') as anon,
+             has_function_privilege('authenticated', p.oid, 'execute') as authed,
+             has_function_privilege('service_role', p.oid, 'execute') as service
+      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+      where n.nspname in ('public', 'private') and p.prokind = 'p'`)).rows;
+    expect(procs.map((p) => p.name)).toEqual(["action_log_drain"]);
+    for (const p of procs) {
+      expect(p.src).toContain("set_config('search_path', '', false)");
+      expect([p.anon, p.authed, p.service]).toEqual([false, false, false]);
     }
     const publicRpc = fns.filter((f) => f.schema === "public" && f.name.startsWith("game_")).map((f) => f.name).sort();
     expect(publicRpc).toEqual(["game_commit", "game_create_player", "game_load_snapshot", "game_rate_limit"]);

@@ -660,11 +660,12 @@ sequenceDiagram
 
 | 層 | 保存 | 用途 |
 |---|---|---|
-| 完整回應（`response`） | 30 天（pg_cron `action-log-compact`，每週） | 回應遺失後以同一個 key 重送：回傳完全相同的結果 |
+| 完整回應（`response`） | 30 天（pg_cron `action-log-compact`：每小時 `call private.action_log_drain()`，分批、每批 commit，直到清完或達上限） | 回應遺失後以同一個 key 重送：回傳完全相同的結果 |
 | 冪等識別（`player_id`、`idempotency_key`、`request_hash`、`command`、`committed`、`response_ok`） | **永久**（settle 以外） | 之後以同一個 key 重送：`REQUEST_EXPIRED`（附當初成功與否），**不重新執行**；不同內容 → `IDEMPOTENCY_MISMATCH` |
 | `settle` | 30 天後整筆刪除 | settle 沒有 Client 指定的效果（只把時間推進到「現在」）：同一個 key 再送只會結算到現在，不會重複發放 |
 
 - trigger `action_log_guard`：冪等識別不可改寫；回應只能被清除（壓縮），不能改成其他內容。
+- 清除吞吐量（PR #15 Review P1）：每批 2,000 列 × 2 種（刪 settle、壓縮交易）、每次最多 500 批 → 每小時最多 2,000,000 列；一位持續在線、每 20 秒同步的玩家每小時約 180 筆 settle。部分索引只涵蓋「還要處理的列」，掃描成本與積壓量成正比。監控：`select private.action_log_backlog()`（待處理數與最老時間，應維持在 0 附近）與 `cron.job_run_details`。
 - **未確認操作的有效期限（Client）**：超過 7 天（`PENDING_MAX_AGE_MS`）的未確認紀錄改送 `Idempotency-Expire: true`（只調和、不執行）。伺服器：key 已存在 → 回傳原本的結果（或 `REQUEST_EXPIRED` 附當初結果）；不存在 → **不執行**，寫下作廢紀錄（`processed = false`），之後同一個 key 的原始請求即使晚到也只會得到作廢結果（唯一鍵 + 同一交易的 CAS）。
 - Client 從不自行判定成功或失敗：`REQUEST_EXPIRED` 依伺服器的 `expired` 欄位顯示，並重新讀取狀態（狀態永遠以伺服器為準）。
 

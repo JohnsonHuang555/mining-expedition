@@ -138,6 +138,29 @@ describe("Action Log 分層保存與 Request ID", () => {
     expect((await act(p.token, { type: "sell_items", itemId: "stone", quantity: 1 }, oldKey)).status).toBe(409);
   });
 
+  it("9b. 積壓清除：pg_cron 每小時執行 drain；> 5,000 筆過期 settle 與交易分批（每批 commit）清完，交易只壓縮", async () => {
+    const job = await pool.query(`select schedule, command, active from cron.job where jobname = 'action-log-compact'`);
+    expect(job.rows).toEqual([{ schedule: "17 * * * *", command: "call private.action_log_drain(interval '30 days')", active: true }]);
+    const p = await newPlayer();
+    const N = 6_000;
+    for (const command of ["settle", "purchase_pickaxe"]) {
+      await pool.query(
+        `insert into public.action_log (player_id, idempotency_key, request_hash, command, committed, state_version_after, response, created_at)
+         select $1::uuid, gen_random_uuid(), repeat('b', 64), $2::text, false, null, jsonb_build_object('ok', true), now() - interval '45 days'
+         from generate_series(1, $3::int)`,
+        [p.id, command, N],
+      );
+    }
+    await pool.query(`call private.action_log_drain(interval '30 days', 2000, 500)`); // 與排程相同的指令（較小的批次）
+    const rows = await pool.query(
+      `select command, count(*)::int as n, count(*) filter (where response is null)::int as compacted from public.action_log where player_id = $1 and created_at < now() - interval '30 days' group by command`,
+      [p.id],
+    );
+    expect(rows.rows).toEqual([{ command: "purchase_pickaxe", n: N, compacted: N }]);
+    const backlog = (await pool.query(`select private.action_log_backlog() as b`)).rows[0].b;
+    expect(backlog).toMatchObject({ settleToDelete: 0, responsesToCompact: 0 });
+  }, 120_000);
+
   it("作廢探詢：從未到達的 Request ID 不執行、寫下作廢紀錄；原始請求晚到也不執行", async () => {
     const p = await newPlayer();
     await pool.query(`insert into public.player_inventory values ($1, 'stone', 30)`, [p.id]);

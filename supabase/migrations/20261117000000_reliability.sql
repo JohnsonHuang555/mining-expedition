@@ -21,7 +21,9 @@ alter table public.action_log add column response_ok boolean;
 alter table public.action_log add column compacted_at timestamptz;
 alter table public.action_log add constraint action_log_response_or_compacted
   check (response is not null or (compacted_at is not null and response_ok is not null));
-create index action_log_created_at on public.action_log (created_at);
+-- 清理用的部分索引：只涵蓋還需要處理的列（處理完就離開索引，掃描成本與積壓量成正比，不與總量成正比）
+create index action_log_settle_created_at on public.action_log (created_at) where command = 'settle';
+create index action_log_uncompacted_created_at on public.action_log (created_at) where command <> 'settle' and response is not null;
 
 -- 已保存的紀錄不可被改寫（只允許 compaction：清掉 response、記下成功與否）
 create or replace function private.action_log_guard() returns trigger
@@ -45,8 +47,9 @@ end $$;
 create trigger action_log_guard before update on public.action_log
   for each row execute function private.action_log_guard();
 
--- 保存期限以外的紀錄：settle 刪除；其他清掉 response（保留冪等識別）。p_player 只用於測試（null = 全部）
-create or replace function private.action_log_compact(p_older_than interval, p_player uuid default null, p_batch integer default 5000)
+-- 保存期限以外的紀錄（一個批次）：settle 刪除；其他清掉 response（保留冪等識別）。p_player 只用於測試（null = 全部）
+-- 每個批次是短交易；持續清除由 private.action_log_drain（每批 commit）負責
+create or replace function private.action_log_compact(p_older_than interval, p_player uuid default null, p_batch integer default 2000)
 returns jsonb
 language plpgsql volatile security definer set search_path = '' as $$
 declare
@@ -61,17 +64,49 @@ begin
     where l.id in (
       select x.id from public.action_log x
       where x.command = 'settle' and x.created_at < v_cutoff and (p_player is null or x.player_id = p_player)
-      order by x.id limit p_batch);
+      order by x.created_at limit p_batch);
   get diagnostics v_deleted = row_count;
   update public.action_log l
     set response_ok = coalesce((l.response ->> 'ok')::boolean, false), compacted_at = now(), response = null
     where l.id in (
       select x.id from public.action_log x
       where x.command <> 'settle' and x.response is not null and x.created_at < v_cutoff and (p_player is null or x.player_id = p_player)
-      order by x.id limit p_batch);
+      order by x.created_at limit p_batch);
   get diagnostics v_compacted = row_count;
   return jsonb_build_object('deletedSettle', v_deleted, 'compacted', v_compacted);
 end $$;
+
+-- 持續清除積壓（PR #15 Review P1）：重複執行批次、每批 commit（短交易、不長時間持有鎖），
+-- 直到沒有過期的列或達到批次上限。每次最多 p_max_batches × p_batch × 2 列；排程每小時執行。
+-- 注意：含 COMMIT 的 procedure 不能是 SECURITY DEFINER、也不能有 SET 子句（PostgreSQL 限制），
+-- 所以在本體開頭清空 search_path，並只使用完整限定名稱；只有 postgres（pg_cron）可以執行。
+create or replace procedure private.action_log_drain(p_older_than interval default interval '30 days', p_batch integer default 2000, p_max_batches integer default 500)
+language plpgsql as $$
+declare
+  r jsonb;
+  i integer := 0;
+begin
+  perform pg_catalog.set_config('search_path', '', false);
+  if p_batch < 1 or p_max_batches < 1 then
+    raise exception 'batch sizes must be positive' using errcode = 'invalid_parameter_value';
+  end if;
+  loop
+    r := private.action_log_compact(p_older_than, null, p_batch);
+    commit;
+    i := i + 1;
+    exit when ((r ->> 'deletedSettle')::integer = 0 and (r ->> 'compacted')::integer = 0) or i >= p_max_batches;
+  end loop;
+end $$;
+
+-- 監控：還沒處理的過期列數與最老的時間（積壓應維持在 0 附近）
+create or replace function private.action_log_backlog(p_older_than interval default interval '30 days') returns jsonb
+language sql stable security definer set search_path = '' as $$
+  select jsonb_build_object(
+    'settleToDelete', (select count(*) from public.action_log l where l.command = 'settle' and l.created_at < now() - p_older_than),
+    'responsesToCompact', (select count(*) from public.action_log l where l.command <> 'settle' and l.response is not null and l.created_at < now() - p_older_than),
+    'oldestPending', (select min(l.created_at) from public.action_log l
+                      where l.created_at < now() - p_older_than and (l.command = 'settle' or l.response is not null)))
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Rate limit
@@ -291,6 +326,8 @@ end $$;
 
 revoke all on function private.action_log_guard() from public, anon, authenticated, service_role;
 revoke all on function private.action_log_compact(interval, uuid, integer) from public, anon, authenticated, service_role;
+revoke all on procedure private.action_log_drain(interval, integer, integer) from public, anon, authenticated, service_role;
+revoke all on function private.action_log_backlog(interval) from public, anon, authenticated, service_role;
 revoke all on function private.rate_limit_hit(uuid, text, integer, integer) from public, anon, authenticated, service_role;
 
 revoke all on function public.game_rate_limit(uuid, text, integer, integer) from public, anon, authenticated;
@@ -301,12 +338,13 @@ revoke all on function public.game_commit(uuid, bigint, uuid, text, text, jsonb,
 grant execute on function public.game_commit(uuid, bigint, uuid, text, text, jsonb, jsonb, text, jsonb) to service_role;
 
 -- ---------------------------------------------------------------------------
--- 每週壓縮（pg_cron；有安裝才排程）：保存 30 天。台灣時間週一 03:17（UTC 週日 19:17）
+-- 每小時清除（pg_cron；有安裝才排程）：保存 30 天。每次最多 500 批 × 2,000 列 × 2 = 2,000,000 列
+-- （估算：一位持續在線的玩家每 20 秒同步一次 → 每小時約 180 筆 settle；上限足以支撐上萬名同時在線玩家）
 -- ---------------------------------------------------------------------------
 
 do $cron$
 begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then
-    perform cron.schedule('action-log-compact', '17 19 * * 0', $job$select private.action_log_compact(interval '30 days')$job$);
+    perform cron.schedule('action-log-compact', '17 * * * *', $job$call private.action_log_drain(interval '30 days')$job$);
   end if;
 end $cron$;

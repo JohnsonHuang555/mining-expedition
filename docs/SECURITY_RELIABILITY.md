@@ -35,7 +35,7 @@
 |---|---|---|
 | P1 | `action_log` 無限成長，且沒有安全的清理方式（settle 每幾秒寫一筆完整回應） | §3 分層保存 |
 | P1 | 沒有任何 API rate limit | §4 |
-| P2 | RPC 沒有逾時：資料庫卡住時 Edge 請求一直等待 | 8 秒逾時 → `SERVER_BUSY`（結果不確定，以同一個 key 調和） |
+| P2 | RPC 沒有逾時：資料庫卡住時 Edge 請求一直等待 | 8 秒逾時 → `SERVER_BUSY`（結果不確定，以同一個 key 調和）；只停止等待，不取消資料庫端的 RPC（§3.5） |
 | P2 | 錯誤 log 缺少可追查的欄位（requestId、command、code、耗時） | §5 |
 | P2 | Client 的未確認操作沒有有效期限（幾週後才送達的舊請求會被當成新交易執行） | §3.3 |
 
@@ -76,8 +76,35 @@ settle 可以整筆刪除的原因：settle 沒有 Client 指定的效果，只�
 
 - `20261117000000_reliability.sql` 只新增欄位、索引、trigger、資料表與函式；**不修改或刪除既有紀錄**（既有 response 仍在，30 天後才壓縮）。
 - `game_load_snapshot` 新版接受舊的三參數呼叫（新參數有預設值）：**先套用 migration，再部署 Edge Functions**；反過來（新 Edge + 舊資料庫）會因參數不存在而失敗。
-- 回滾：Edge Functions 可以回到前一版（新資料庫相容）。資料庫若要回滾：壓縮過的紀錄 `response` 為 null，舊版 `game_load_snapshot` 會把它當成 `replay` 回傳 null → **不可在壓縮執行後回滾資料庫**；回滾前先停用 `action-log-compact` 排程。
-- pg_cron：`action-log-compact` 每週一 03:17（台灣）壓縮 30 天前的紀錄，每次最多 5,000 筆各類；沒有 pg_cron 時不清理（安全，只是不節省空間）。
+- pg_cron `action-log-compact`：**每小時**執行 `call private.action_log_drain(interval '30 days')`。
+  - 分批處理：每批刪除 / 壓縮各最多 2,000 列，**每批 commit**（短交易，不長時間鎖表），直到沒有過期列或達到 500 批。
+  - 吞吐量：每小時最多約 2,000,000 列；一位持續在線、每 20 秒同步的玩家每小時約 180 筆 settle（每週約 30,240 筆）。
+  - 沒有 pg_cron 時不清理（安全，只是不節省空間）。
+- 監控：`select private.action_log_backlog();` 回傳待刪除的 settle 數、待壓縮的回應數與最老的待處理時間，正常應接近 0；排程結果見 `cron.job_run_details`。
+- 測試：6,000 筆過期 settle + 6,000 筆過期交易 → 有上限的一次執行只處理指定批數、下一次接續清完；交易全部保留冪等鍵（PGlite 與 Supabase Local）。
+
+### 3.5 部署與回滾 SOP（Staging / Cloud）
+
+> 以下是**營運程序**，不是已經演練過的保證；Cloud 上的備份還原演練尚未進行。
+
+**部署**
+1. 備份資料庫（含 `public.action_log`、`private.market_secret`、`private.player_secrets`）。
+2. 套用 migration（`supabase db push`）。
+3. 確認 PostgREST 可以呼叫新的 RPC（service_role 呼叫 `game_load_snapshot` 的六參數版本與 `game_rate_limit`），並確認 `cron.job` 有 `action-log-compact`、`market-daily-prices`。
+4. 部署 Edge Functions（`character-create`、`game-state`、`game-action`）。
+5. 觀察 log：`request_failed`、`db_error`、`rate_limited` 的數量與 `durationMs`。
+
+**回滾**
+1. Edge Functions 可以直接回到前一版（新資料庫相容舊的三參數呼叫）。
+2. 若要回滾資料庫，**先停用壓縮排程**：`select cron.unschedule('action-log-compact');`
+3. 第一次壓縮執行之後，資料庫不可回滾到不支援 `response = null` 的舊版函式（舊版會把已壓縮的紀錄當成 replay 並回傳 null）；這時只能修正往前（roll forward），或從壓縮前的備份還原。
+4. 還原備份時必須包含 `private.market_secret`：遺失會讓之後的每日價格序列與原本不同（已產生的價格仍保留）。
+
+**Staging 必須驗證的項目**
+- Supabase Auth 的註冊 / 登入限流（`[auth.rate_limit]`）與 CAPTCHA：本專案尚未設定。
+- 未認證 / 惡意 JWT 的流量：只由 `auth.getUser` 拒絕，沒有 IP 層級限制，依賴平台額度與 gateway。
+- 真實 Edge Runtime 在負載下的 503 頻率（Supabase Local 偶發空回應 503）。
+- RPC 逾時：Edge 以 `Promise.race` 在 8 秒後回應 `SERVER_BUSY`，**不會取消資料庫中正在執行的 RPC**；該交易仍可能完成並提交（由同一個 key 調和）。負載測試時需觀察資料庫端實際的 RPC 執行時間、鎖等待與積壓，不能假設 8 秒後資料庫端就會停止。
 
 ## 4. API Rate Limit
 
