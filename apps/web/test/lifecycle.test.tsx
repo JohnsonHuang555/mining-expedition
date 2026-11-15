@@ -76,12 +76,12 @@ describe("Runtime 生命週期", () => {
     const a = crypto.randomUUID();
     const b = crypto.randomUUID();
     const p = { requestId: crypto.randomUUID(), command: { type: "craft", materialId: "iron_ingot", times: 1 } as const, createdAt: 1 };
-    browserPendingStore(a).save(p);
-    expect(localStorage.getItem(pendingStorageKey(a))).not.toBeNull();
-    expect(browserPendingStore(b).load()).toBeNull();
-    expect(browserPendingStore(a).load()).toEqual(p);
-    browserPendingStore(a).save(null);
-    expect(localStorage.getItem(pendingStorageKey(a))).toBeNull();
+    browserPendingStore(a).put(p);
+    expect(localStorage.getItem(pendingStorageKey(a, p.requestId))).not.toBeNull();
+    expect(browserPendingStore(b).list()).toEqual([]);
+    expect(browserPendingStore(a).list()).toEqual([p]);
+    browserPendingStore(a).remove(p.requestId);
+    expect(localStorage.getItem(pendingStorageKey(a, p.requestId))).toBeNull();
   });
 
   it("GameScreens 卸載時移除事件監聽並停止計時器", async () => {

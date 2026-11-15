@@ -30,8 +30,8 @@ export interface GameApiOptions {
   getAccessToken(): Promise<string | null>;
   /** 強制更新 token（收到 401 時呼叫一次）；失敗回傳 null */
   refreshAccessToken(): Promise<string | null>;
-  /** 更新後仍然 401：登入已失效 */
-  onUnauthorized?(): void;
+  /** 更新後仍然 401：登入已失效（呼叫端必須確認目前的 session 仍屬於同一位使用者才登出） */
+  onUnauthorized?(): void | Promise<void>;
   fetch?: typeof fetch;
   sleep?(ms: number): Promise<void>;
   /** 每次請求的逾時（毫秒） */
@@ -101,7 +101,7 @@ export function createGameApi(opts: GameApiOptions): GameApi {
   async function request(fn: string, method: string, body: unknown, key: string | null): Promise<ApiResult> {
     let token = await opts.getAccessToken();
     if (!token) {
-      opts.onUnauthorized?.();
+      await opts.onUnauthorized?.();
       return { ok: false, status: null, code: "UNAUTHORIZED", message: "sign in required", body: null };
     }
     let refreshed = false;
@@ -111,7 +111,7 @@ export function createGameApi(opts: GameApiOptions): GameApi {
         const next = refreshed ? null : await opts.refreshAccessToken();
         refreshed = true;
         if (!next) {
-          opts.onUnauthorized?.();
+          await opts.onUnauthorized?.();
           return r;
         }
         token = next;

@@ -17,9 +17,14 @@ export type BusyOp = "bootstrap" | "settle" | "reconcile" | "claim" | "mode" | "
 export interface ActionResult {
   requestId: string;
   command: GameCommand["type"];
-  /** ok：伺服器確認成功；rejected：伺服器確認拒絕（沒有任何變更）；uncertain：結果未確認（保留，之後以同一個 requestId 調和） */
+  /** ok：伺服器確認成功；rejected：伺服器確認拒絕（交易本身未執行）；uncertain：結果未確認（保留，之後以同一個 requestId 調和） */
   outcome: "ok" | "rejected" | "uncertain";
   message: string | null;
+  /**
+   * 拒絕時：伺服器是否仍然提交了操作前的結算（executeRequest 先結算、再執行操作；
+   * 操作被拒絕時挖掘進度、在線獎勵或離線報告仍可能已經同步）
+   */
+  synced: boolean;
   /** 伺服器回傳的事件（成功時；例如 items_sold 的實際金幣） */
   events: GameEvent[];
   at: number;
@@ -50,6 +55,8 @@ export interface GameUiState {
   busy: BusyOp | null;
   /** 結果尚未確認的操作（重新整理後也會從 storage 恢復）。存在時不接受其他玩家操作 */
   pending: PendingAction | null;
+  /** 這位使用者（所有分頁）的未確認操作數 */
+  pendingCount: number;
   /** 最近一次玩家操作的結果 */
   lastAction: ActionResult | null;
   /** 最近一次結算摘要（「最新挖掘成果」） */
@@ -71,6 +78,7 @@ export const initialUiState = (): GameUiState => ({
   receivedAt: 0,
   busy: null,
   pending: null,
+  pendingCount: 0,
   lastAction: null,
   lastSettlement: null,
   recentLoot: [],

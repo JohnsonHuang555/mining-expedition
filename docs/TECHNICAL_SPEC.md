@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.11 | Client Hardening：§12.6 未確認操作改為每筆一個 key + Web Locks 跨分頁排隊、待領報告的未確認領取優先調和、拒絕回應的 `synced`；新增 §12.11 跨分頁失敗模式、§12.12 帳號切換的 401。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.10 | Inventory & Workshop：新增 §12.9 背包 / 工坊 / 製作畫面與路由（`/inventory`、`/workshop`，共用 `(game)` layout）、§12.10 出售價格來源。**遊戲規則、數值、成本、配方與 RNG_VERSION 不變** |
 | v1.9 | Client Reliability：§12.6 未確認操作（Request ID 持久化與調和）、回應結構驗證；新增 §12.8 Runtime 生命週期。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.8 | Playable MVP（Auth + Mining UI）：§12 改為已實作的前端（Zustand store、`predictBlockProgress`、同步排程 20 秒心跳 / 方塊完成時同步（間隔 ≥ 10 秒）、路由 `/`、`/login`），新增 §12.6 API Client 與錯誤處理、§12.7 多分頁。**遊戲規則、數值與 RNG_VERSION 不變** |
@@ -710,7 +711,7 @@ interface GameUiState {
 - Idempotency-Key：每個獨立操作 `crypto.randomUUID()`；同一個操作的所有重試沿用同一個 key（包含玩家按「重試」領取同一份報告）。
 - 401：`refreshSession()` 一次後以同一個 key 重送；仍失敗 → 本機登出並導向 `/login?expired=1`。
 - 網路錯誤、逾時（15 秒）、502 / 503 / 504、`SERVER_BUSY`、`VERSION_CONFLICT`：以同一個 key 退避重試（0.5 / 1.5 / 3.5 秒）。逾時的請求可能已提交，重送會拿到伺服器保存的同一個回應。
-- **未確認操作【v1.9】**：玩家操作（領取、模式、解鎖、出售、購買、裝備、強化、製作）送出前先把 `{ requestId, command }` 存到 `localStorage`（key 含 userId：`mining-expedition:pending-action:v1:<userId>`）。
+- **未確認操作【v1.9，v1.11 改為每筆一個 key】**：玩家操作（領取、模式、解鎖、出售、購買、裝備、強化、製作）送出前先把 `{ requestId, command }` 存到 `localStorage`：`mining-expedition:pending-action:v2:<userId>:<requestId>`（每筆操作一個 key，分頁只新增 / 刪除自己那筆；v1 的單一 key 讀取時自動轉換）。
   - 清除條件：伺服器確定的結果——成功，或已保存在 `action_log` 的遊戲規則拒絕（金幣不足等）。
   - 保留條件：`NETWORK`、逾時、`BAD_RESPONSE`、503 `SERVER_BUSY`、409 `VERSION_CONFLICT`、500、401——這些都不代表伺服器沒有提交。
   - 調和：玩家重按同一個操作、下一次自動同步、或重新整理後的 bootstrap，都以**同一個 requestId** 重送；伺服器回傳原結果（已提交）或第一次執行（未提交）。
@@ -744,6 +745,35 @@ interface GameUiState {
 | 礦物 / 寶石 | 固定 `MINERALS[id].sellPrice × 數量` | 引擎 `sell_items` | ✅ 開放 |
 | 製作素材 | 不可出售（P16） | 引擎拒絕 | 只顯示 |
 | 寶物 | `floor(BaseValue × 當日倍率)`（GBS §13） | 伺服器 `market_prices`（`game_load_snapshot` 載入）；缺少倍率時引擎回 `INVALID_REQUEST` | ❌ 不開放：每日價格排程尚未完成，Client 不假造倍率；留到市場與圖鑑階段 |
+
+### 12.11 跨分頁交易與失敗模式【v1.11】
+
+同一位使用者的玩家操作在所有分頁之間以 **Web Locks**（`navigator.locks`，鎖名 `mining-expedition:actions:<userId>`）排隊。拿到鎖之後：
+
+1. 重新讀取 storage 的所有未確認操作（可能來自其他分頁）。
+2. 先以各自原本的 requestId 調和；仍有任何一筆不確定 → 不開始新的交易（提示「上一個操作（可能在其他分頁）尚未確認」）。
+3. 才送出新的交易。
+
+**正確性不依賴鎖或 BroadcastChannel**：唯一的冪等依據仍是伺服器的 `action_log`。
+
+| 情況 | 處理 |
+|---|---|
+| Web Locks 不支援 / 鎖失效 | 只在分頁內排隊；兩個分頁可能同時以**同一個** requestId 重送 → 伺服器回傳同一個結果，只套用一次；每筆紀錄獨立保存，不會互相覆蓋 |
+| 等鎖超過 20 秒（另一個分頁的請求很慢） | 不送出新交易，提示「其他分頁正在進行交易」 |
+| 分頁在請求進行中關閉 / 崩潰 | 瀏覽器自動釋放 Web Lock；紀錄留在 storage；其他分頁經 `storage` 事件得知並在 5 秒內調和（或下次開啟時 bootstrap 調和） |
+| 兩個分頁同時重新整理 | 兩個 bootstrap 依序取得鎖；第一個確認並刪除紀錄，第二個看到已沒有紀錄。鎖失效時兩個都以同一個 requestId 重送，伺服器只套用一次 |
+| 離線 | 紀錄保留，退避排程（5 → 30 秒）與 `online` 事件時調和；期間不接受新的交易 |
+| 未確認的 `claim_report` | 「有未確認操作」優先於「待領報告暫停排程」：繼續以退避排程調和；成功後報告消失並恢復正常同步；同一份報告只會入帳一次 |
+| storage 無法寫入（私密模式 / 容量） | 退回分頁記憶體；重新整理後無法恢復，但伺服器仍保證不重複 |
+
+拒絕回應（`ok: false`、已保存在 `action_log`）代表**交易本身沒有執行**；但伺服器先結算再執行操作，`stateVersion` 前進時表示挖掘結算已同步（`lastAction.synced = true`），提示文字會說明，不再顯示「沒有任何變更」。
+
+### 12.12 帳號切換與延遲 401【v1.11】
+
+- 每個 runtime 只服務一個 userId。共用的 Supabase client 可能已換成另一位使用者，所以：
+  - `getAccessToken`：目前 session 不是這個 userId → 不送出請求。
+  - `refreshAccessToken` / `onUnauthorized`：只有目前 session 仍屬於這個 userId（且 runtime 未 dispose）時才更新或 `signOut({ scope: "local" })`。
+- 因此 A 帳號的舊請求晚收到 401，不會更新、登出或清除 B 的 session；A 的 Controller 已 dispose，不會寫入任何 store。
 
 ### 12.7 多分頁
 

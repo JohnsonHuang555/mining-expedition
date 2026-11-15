@@ -1,29 +1,101 @@
 "use client";
 
-import { type ReactNode, useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { PixelButton } from "./pixel";
 
-/** 重要交易的確認視窗（避免誤觸大量出售） */
-export function ConfirmDialog({ title, children, confirmLabel, onConfirm, onCancel }: { title: string; children: ReactNode; confirmLabel: string; onConfirm(): void; onCancel(): void }) {
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * 重要交易的確認視窗（避免誤觸大量出售）。
+ * - 開啟時聚焦「取消」；Tab / Shift+Tab 只在視窗內循環（focus trap）；Esc 取消。
+ * - 關閉後把焦點還給開啟視窗前的元素。
+ * - 確認只會觸發一次；`disabled`（例如出現待領報告或未確認操作）時無法確認。
+ */
+export function ConfirmDialog({
+  title,
+  children,
+  confirmLabel,
+  onConfirm,
+  onCancel,
+  disabled = false,
+  disabledReason,
+}: {
+  title: string;
+  children: ReactNode;
+  confirmLabel: string;
+  onConfirm(): void;
+  onCancel(): void;
+  disabled?: boolean;
+  disabledReason?: string;
+}) {
+  const dialog = useRef<HTMLDivElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef(onCancel);
+  const [submitted, setSubmitted] = useState(false);
   useEffect(() => {
+    cancelRef.current = onCancel;
+  });
+
+  useEffect(() => {
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     cancel.current?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onCancel]);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        cancelRef.current();
+        return;
+      }
+      if (e.key !== "Tab" || !dialog.current) return;
+      const items = [...dialog.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
+      if (items.length === 0) return;
+      const first = items[0]!;
+      const last = items[items.length - 1]!;
+      const active = document.activeElement;
+      if (!dialog.current.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (opener?.isConnected) opener.focus();
+    };
+  }, []);
+
+  const blocked = disabled || submitted;
   return (
     <div role="alertdialog" aria-modal="true" aria-labelledby="confirm-title" className="fixed inset-0 z-40 flex items-end justify-center bg-black/70 p-3 sm:items-center">
-      <div className="pixel-frame animate-pop w-full max-w-sm p-4">
+      <div ref={dialog} className="pixel-frame animate-pop w-full max-w-sm p-4">
         <h2 id="confirm-title" className="text-base font-black text-gold">
           {title}
         </h2>
         <div className="mt-2 text-sm">{children}</div>
+        {disabled && disabledReason && (
+          <p className="mt-2 text-xs text-danger" role="status">
+            {disabledReason}
+          </p>
+        )}
         <div className="mt-4 grid grid-cols-2 gap-3">
-          <PixelButton tone="ghost" ref={cancel} onClick={onCancel}>
+          <PixelButton tone="ghost" ref={cancel} onClick={() => cancelRef.current()}>
             取消
           </PixelButton>
-          <PixelButton onClick={onConfirm}>{confirmLabel}</PixelButton>
+          <PixelButton
+            disabled={blocked}
+            onClick={() => {
+              if (blocked) return;
+              setSubmitted(true);
+              onConfirm();
+            }}
+          >
+            {confirmLabel}
+          </PixelButton>
         </div>
       </div>
     </div>

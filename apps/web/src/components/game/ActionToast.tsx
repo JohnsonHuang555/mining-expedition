@@ -8,8 +8,9 @@ import { useGame } from "./runtime-context";
 
 /** 伺服器確認的結果 → 玩家看得懂的文字（金額等數值一律取自伺服器事件） */
 export function describeAction(a: ActionResult): string {
-  if (a.outcome === "rejected") return `✗ ${a.message ?? "操作失敗"}（沒有任何變更）`;
-  if (a.outcome === "uncertain") return `⋯ ${a.message ?? "結果尚未確認"}`;
+  // 拒絕：交易本身沒有執行（沒有扣除金幣 / 素材），但操作前的挖掘結算可能已經同步
+  if (a.outcome === "rejected") return `✗ ${a.message ?? "操作失敗"}：此操作未執行，沒有扣除金幣或素材${a.synced ? "（挖掘結算已同步）" : ""}`;
+  if (a.outcome === "uncertain") return `⋯ 結果尚未確認：會以同一筆請求自動確認，不會重複執行`;
   const parts: string[] = [];
   for (const e of a.events) {
     switch (e.type) {

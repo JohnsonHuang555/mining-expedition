@@ -8,7 +8,7 @@ import { type SupabaseClient, createClient } from "@supabase/supabase-js";
 import { afterAll, describe, expect, it } from "vitest";
 import { createGameApi, newRequestId } from "../../apps/web/src/lib/game/api.ts";
 import { GameController, type SyncChannel } from "../../apps/web/src/lib/game/controller.ts";
-import { memoryPendingStore, type PendingStore } from "../../apps/web/src/lib/game/pending.ts";
+import { type ActionLock, memoryActionLock, memoryPendingStore, type PendingStore } from "../../apps/web/src/lib/game/pending.ts";
 import { createGameStore } from "../../apps/web/src/lib/game/store.ts";
 import { PASSWORD, env, pool } from "./src/backend.ts";
 
@@ -24,7 +24,7 @@ function browser(storage = memoryStorage()): SupabaseClient {
   return createClient(env.apiUrl, env.anonKey, { auth: { persistSession: true, autoRefreshToken: false, storage, storageKey: "sb-test" } });
 }
 
-function tab(supabase: SupabaseClient, channel: SyncChannel | null = null, opts: { pendingStore?: PendingStore; fetch?: typeof fetch } = {}) {
+function tab(supabase: SupabaseClient, channel: SyncChannel | null = null, opts: { pendingStore?: PendingStore; fetch?: typeof fetch; actionLock?: ActionLock } = {}) {
   const store = createGameStore();
   const out = { signedOut: 0 };
   const api = createGameApi({
@@ -38,7 +38,7 @@ function tab(supabase: SupabaseClient, channel: SyncChannel | null = null, opts:
     },
     retryDelaysMs: [200, 400],
   });
-  const controller = new GameController({ api, store, channel, pendingStore: opts.pendingStore, onSignedOut: () => void out.signedOut++ });
+  const controller = new GameController({ api, store, channel, pendingStore: opts.pendingStore, actionLock: opts.actionLock, onSignedOut: () => void out.signedOut++ });
   return { api, store, controller, out };
 }
 
@@ -196,7 +196,7 @@ describe("Web Client × 真實 Supabase Local", () => {
     await a.controller.bootstrap();
     expect(await a.controller.perform({ type: "purchase_pickaxe", pickaxeId: "pick_stone" })).toBe("uncertain");
     expect(drops).toBe(3);
-    const key = storage.value!.requestId;
+    const key = storage.list()[0]!.requestId;
     const committed = await pool.query(`select count(*)::int as n from public.action_log where player_id = $1 and idempotency_key = $2`, [u.userId, key]);
     expect(committed.rows[0].n).toBe(1);
     const coinsAfter = (await pool.query(`select coins from public.players where id = $1`, [u.userId])).rows[0].coins;
@@ -266,5 +266,40 @@ describe("Web Client × 真實 Supabase Local", () => {
     expect(s1.equippedPickaxe).toBe("pick_stone");
     const db = await pool.query(`select coins from public.players where id = $1`, [u.userId]);
     expect(String(s1.coins)).toBe(String(db.rows[0].coins));
+  });
+
+  it("同帳號兩個分頁同時不同交易（A 出售的回應遺失、B 購買）：A 的紀錄不被覆蓋，兩筆在 action_log 各只有一次", async () => {
+    const u = await signUp();
+    await tab(u.supabase).controller.createCharacter();
+    await pool.query(`update public.players set coins = 1000 where id = $1`, [u.userId]);
+    await pool.query(`insert into public.player_inventory values ($1, 'stone', 200)`, [u.userId]);
+    const storage = memoryPendingStore(); // 兩個分頁共用的 localStorage
+    const lock = memoryActionLock(); // 兩個分頁共用的 Web Locks
+    const lossy: typeof fetch = async (input, init) => {
+      const res = await fetch(input, init);
+      if (String(init?.body).includes("sell_items")) throw new TypeError("response lost");
+      return res;
+    };
+    const a = tab(u.supabase, null, { pendingStore: storage, actionLock: lock, fetch: lossy });
+    const b = tab(browser(u.storage), null, { pendingStore: storage, actionLock: lock });
+    await a.controller.bootstrap();
+    await b.controller.bootstrap();
+    const [oa, ob] = await Promise.all([
+      a.controller.perform({ type: "sell_items", itemId: "stone", quantity: 10 }),
+      b.controller.perform({ type: "purchase_pickaxe", pickaxeId: "pick_stone" }),
+    ]);
+    expect(oa).toBe("uncertain");
+    expect(ob).toBe("ok"); // B 先以 A 的 Request ID 確認了出售，再購買
+    expect(storage.list()).toEqual([]);
+    const log = await pool.query(`select command, count(*)::int as n from public.action_log where player_id = $1 and command in ('sell_items', 'purchase_pickaxe') group by command order by command`, [u.userId]);
+    expect(log.rows).toEqual([
+      { command: "purchase_pickaxe", n: 1 },
+      { command: "sell_items", n: 1 },
+    ]);
+    // A 重新整理：沒有剩下的未確認交易，不會再送出
+    const a2 = tab(browser(u.storage), null, { pendingStore: storage, actionLock: lock });
+    await a2.controller.bootstrap();
+    expect(a2.store.getState().pendingCount).toBe(0);
+    expect(a2.store.getState().view!.state.pickaxes).toMatchObject({ pick_stone: 1 });
   });
 });

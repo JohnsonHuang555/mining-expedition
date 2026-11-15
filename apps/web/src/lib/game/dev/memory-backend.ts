@@ -23,6 +23,8 @@ export class MemoryBackend {
   readonly tokens = new Map<string, string>();
   /** 接下來的請求依序套用的故障 */
   readonly faults: Fault[] = [];
+  /** 只套用在符合條件的請求上的故障（times 次） */
+  readonly rules: { match: (fn: string, body: unknown) => boolean; fault: Fault; times: number }[] = [];
   /** 每個請求的人工延遲（毫秒） */
   latencyMs = 0;
   readonly requests: { fn: string; key: string | null; body: unknown; status: number | "network" }[] = [];
@@ -101,7 +103,9 @@ export class MemoryBackend {
     const key = headers.get("Idempotency-Key");
     const body = typeof init.body === "string" && init.body ? JSON.parse(init.body) : undefined;
     if (this.latencyMs > 0) await new Promise((r) => setTimeout(r, this.latencyMs));
-    const fault = this.faults.shift();
+    const rule = this.rules.find((r) => r.times > 0 && r.match(fn, body));
+    if (rule) rule.times--;
+    const fault = rule ? rule.fault : this.faults.shift();
     if (fault === "network") {
       this.requests.push({ fn, key, body, status: "network" });
       throw new TypeError("Failed to fetch");

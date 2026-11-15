@@ -131,7 +131,14 @@ function MineralLine({ row }: { row: MineralRow }) {
         </PixelButton>
       </div>
       {confirm !== null && (
-        <ConfirmDialog title="確認出售" confirmLabel="確定出售" onCancel={() => setConfirm(null)} onConfirm={() => void sell(confirm)}>
+        <ConfirmDialog
+          title="確認出售"
+          confirmLabel="確定出售"
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => void sell(confirm)}
+          disabled={!actionable || confirm > row.quantity}
+          disabledReason={confirm > row.quantity ? "持有數量已變更，請重新選擇數量" : "目前有待領取的報告或尚未確認的操作，暫時無法出售"}
+        >
           出售 {itemName(row.id)} ×{confirm.toLocaleString("zh-TW")}，預估獲得 <span className="font-bold text-gold">{coins(sellEstimate(row.id as MineralId, confirm))}</span> 金幣？
           <p className="mt-1 text-xs text-parchment-dim">實際金額以伺服器結算為準。</p>
         </ConfirmDialog>
