@@ -79,8 +79,11 @@ export interface SetRow {
   /** 目前持有的成員種類數（每種至少 1 件才算） */
   heldMembers: number;
   total: number;
-  /** 1. 歷史上曾經集齊（所有成員都在圖鑑中） */
-  everCompleted: boolean;
+  /**
+   * 1. 圖鑑已發現全部成員（每一件都曾經發現過）。
+   * 注意：只代表「分別發現過」，不代表曾經同時持有、或曾經啟動過套組（目前沒有這種歷史紀錄）。
+   */
+  allDiscovered: boolean;
   /** 2. 目前持有足夠的寶物 */
   ownedNow: boolean;
   /** 3. 目前實際生效（引擎 activeSets，與伺服器結算相同的規則） */
@@ -104,7 +107,7 @@ export function setRows(state: PlayerGameState): SetRow[] {
       members,
       heldMembers,
       total: members.length,
-      everCompleted: members.every((m) => m.discovered),
+      allDiscovered: members.every((m) => m.discovered),
       ownedNow: heldMembers === members.length,
       active: active.has(id),
       speedPct: def.speedPct,

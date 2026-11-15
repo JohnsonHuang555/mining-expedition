@@ -6,6 +6,7 @@ import { CreateCharacter } from "@/components/game/CreateCharacter";
 import { GameFrame, MineContent } from "@/components/game/Dashboard";
 import { CollectionPage } from "@/components/game/CollectionPage";
 import { InventoryPage } from "@/components/game/InventoryPage";
+import { RevealOverlay } from "@/components/game/RevealOverlay";
 import { WorkshopPage } from "@/components/game/WorkshopPage";
 import { OfflineReportModal } from "@/components/game/OfflineReportModal";
 import { RuntimeContext, useGame } from "@/components/game/runtime-context";
@@ -13,10 +14,11 @@ import { createGameApi } from "@/lib/game/api";
 import { GameController } from "@/lib/game/controller";
 import { MemoryBackend } from "@/lib/game/dev/memory-backend";
 import type { GameRuntime } from "@/lib/game/runtime";
+import { RevealQueue } from "@/lib/game/reveal";
 import { createGameStore } from "@/lib/game/store";
 
 const HOUR = 3_600_000;
-const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report", "economy", "collection"] as const;
+const SCENES = ["new", "mining", "blocked_power", "blocked_unlock", "report", "economy", "collection", "reveal"] as const;
 type Scene = (typeof SCENES)[number];
 
 async function build(scene: Scene): Promise<GameRuntime> {
@@ -27,7 +29,8 @@ async function build(scene: Scene): Promise<GameRuntime> {
   // 記憶體後端的伺服器時間跟著本機時間走
   setInterval(() => (backend.now = Math.max(backend.now, Date.now())), 250);
   const store = createGameStore();
-  const controller = new GameController({ api, store, channel: null });
+  const reveals = new RevealQueue();
+  const controller = new GameController({ api, store, channel: null, reveals });
   if (scene !== "new") {
     await controller.createCharacter();
     if (scene === "mining") backend.rewind(userId, 240_000);
@@ -79,6 +82,21 @@ async function build(scene: Scene): Promise<GameRuntime> {
         x.mining.digCounter = 640;
       });
     await controller.retryBootstrap();
+    if (scene === "reveal") {
+      const order = new URLSearchParams(window.location.search).get("first") === "epic" ? ["a_z1_lantern", "a_z1_heart"] : ["a_z1_heart", "a_z1_lantern"];
+      reveals.enqueue(
+        order.map((artifactId, i) => ({
+          key: `d${900 + i}`,
+          digCounter: 900 + i,
+          artifactId: artifactId as never,
+          rarity: artifactId === "a_z1_heart" ? ("legendary" as const) : ("epic" as const),
+          isNewDiscovery: true,
+          protection: artifactId === "a_z1_lantern",
+          origin: "offline" as const,
+        })),
+      );
+      store.setState({ reveals: reveals.items() });
+    }
   }
   return { userId, api, store, controller };
 }
@@ -101,6 +119,7 @@ function Screens() {
       <GameFrame email="preview@example.com" onSignOut={() => {}}>
         <Tab />
       </GameFrame>
+      <RevealOverlay />
       {view.state.pendingOfflineReport && <OfflineReportModal report={view.state.pendingOfflineReport} />}
     </>
   );

@@ -14,6 +14,7 @@ import { getSupabase, publicSupabaseEnv } from "../auth/supabase";
 import { type GameApi, createGameApi } from "./api";
 import { GameController } from "./controller";
 import { browserActionLock, browserPendingStore } from "./pending";
+import { RevealQueue, browserRevealStore } from "./reveal";
 import { type GameStore, createGameStore } from "./store";
 
 export interface GameRuntime {
@@ -68,6 +69,7 @@ export const browserRuntimeFactory: RuntimeFactory = (userId, onSignedOut) => {
     store,
     pendingStore: browserPendingStore(userId),
     actionLock: browserActionLock(userId),
+    reveals: new RevealQueue(browserRevealStore(userId)),
     onSignedOut,
     isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
   });

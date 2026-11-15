@@ -9,6 +9,7 @@ import { createStore } from "zustand/vanilla";
 import type { ArtifactId, ItemId } from "@mining/game-data";
 import type { GameCommand, GameEvent, PlayerStateView, SettleSummary } from "@mining/game-engine";
 import type { PendingAction } from "./pending";
+import type { RevealItem } from "./reveal";
 
 export type Phase = "booting" | "signed_out" | "no_character" | "ready" | "error";
 export type BusyOp = "bootstrap" | "settle" | "reconcile" | "claim" | "mode" | "unlock" | "create" | "refresh" | "sell" | "buy" | "equip" | "upgrade" | "craft";
@@ -59,6 +60,8 @@ export interface GameUiState {
   pendingCount: number;
   /** 最近一次玩家操作的結果 */
   lastAction: ActionResult | null;
+  /** 待播放的寶物揭曉（伺服器確認後才會加入；只影響 UI） */
+  reveals: RevealItem[];
   /** 最近一次結算摘要（「最新挖掘成果」） */
   lastSettlement: { summary: SettleSummary; blocks: LootEntry[]; at: number } | null;
   recentLoot: LootEntry[];
@@ -80,6 +83,7 @@ export const initialUiState = (): GameUiState => ({
   pending: null,
   pendingCount: 0,
   lastAction: null,
+  reveals: [],
   lastSettlement: null,
   recentLoot: [],
   sync: { ok: true, lastOkAt: null, failures: 0, message: null },

@@ -8,6 +8,7 @@ import { Panel, PixelButton } from "@/components/ui/pixel";
 import { CreateCharacter } from "./CreateCharacter";
 import { GameFrame, MineContent } from "./Dashboard";
 import { OfflineReportModal } from "./OfflineReportModal";
+import { RevealOverlay } from "./RevealOverlay";
 import { RuntimeContext, useController, useGame } from "./runtime-context";
 import { useGameRuntime } from "./use-game-runtime";
 
@@ -90,6 +91,7 @@ export function GameScreens({ email, onSignOut, children }: { email: string | nu
         {children ?? <MineContent />}
       </GameFrame>
       {view.state.pendingOfflineReport && <OfflineReportModal report={view.state.pendingOfflineReport} />}
+      <RevealOverlay />
     </>
   );
 }

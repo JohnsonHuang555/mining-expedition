@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { type Page, expect, test } from "@playwright/test";
 import pg from "pg";
+import { closeReveals } from "./reveal-helpers";
 
 const pool = new pg.Pool({ connectionString: process.env.SUPABASE_DB_URL ?? "postgresql://postgres:postgres@127.0.0.1:54322/postgres", max: 2 });
 test.afterAll(async () => pool.end());
@@ -84,6 +85,7 @@ test("註冊 → 建立角色 → 挖礦主畫面 → 同步 → Session 恢復 
   await expect(page.getByRole("button", { name: "立即同步" })).toHaveCount(0); // 主畫面被報告覆蓋（aria-hidden）
   await dialog.getByRole("button", { name: "領取探險成果" }).click();
   await expect(dialog).toBeHidden();
+  await closeReveals(page);
   const coins = Number((await page.getByTestId("coins").textContent())!.replace(/[^\d]/g, ""));
   expect(coins).toBeGreaterThanOrEqual(reward);
   const db = await pool.query<{ n: number }>(`select count(*)::int as n from public.offline_reports where player_id = $1 and status = 'claimed'`, [id]);
@@ -133,14 +135,14 @@ test("多分頁：一個分頁領取報告後，另一個分頁也更新", async
   await a.reload();
   const b = await context.newPage();
   await b.goto("/");
-  await expect(a.getByRole("dialog")).toBeVisible();
-  await expect(b.getByRole("dialog")).toBeVisible();
+  await expect(a.getByRole("dialog", { name: "⛏ 探險報告" })).toBeVisible();
+  await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeVisible();
   await a.getByRole("button", { name: "領取探險成果" }).click();
-  await expect(a.getByRole("dialog")).toBeHidden();
+  await expect(a.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden();
   // 另一個分頁：收到通知後重新讀取，或按領取時得到「已領取」並恢復
-  await expect(b.getByRole("dialog")).toBeHidden({ timeout: 10_000 }).catch(async () => {
+  await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden({ timeout: 10_000 }).catch(async () => {
     await b.getByRole("button", { name: "領取探險成果" }).click();
-    await expect(b.getByRole("dialog")).toBeHidden();
+    await expect(b.getByRole("dialog", { name: "⛏ 探險報告" })).toBeHidden();
   });
   await expect(b.getByTestId("coins")).toHaveText((await a.getByTestId("coins").textContent())!);
 });

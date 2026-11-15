@@ -28,6 +28,9 @@ async function mount(setup: (s: PlayerGameState) => void = () => {}) {
   await r.controller.createCharacter();
   r.backend.mutate(r.userId, setup);
   await r.controller.retryBootstrap();
+  // 測試準備直接寫入的寶物會被當成「新取得」而進入揭曉佇列；圖鑑測試不需要演出
+  await flush();
+  r.controller.dismissAllReveals();
   const runtime = { userId: r.userId, api: null as never, store: r.store, controller: r.controller } satisfies GameRuntime;
   const wrap = (ui: ReactNode) =>
     render(
@@ -141,7 +144,7 @@ describe("套組", () => {
     sets();
     expect(r.view().stats).toMatchObject({ speed1000: 1_000, luckPpm: 0 });
     expect(screen.getByTestId("set-active-ancient_civilization").dataset.ok).toBe("false");
-    expect(screen.getByTestId("set-ever-ancient_civilization").dataset.ok).toBe("true");
+    expect(screen.getByTestId("set-discovered-ancient_civilization").dataset.ok).toBe("true");
     expect(screen.getByTestId("set-owned-ancient_civilization").dataset.ok).toBe("false");
     expect(screen.getByTestId("set-missing-ancient_civilization").textContent).toContain("遠古王者之戒（已發現，目前未持有）");
     expect(screen.getByTestId("sets-luck").textContent).toBe("0.0%");
@@ -166,3 +169,71 @@ describe("套組", () => {
     expect(screen.getByTestId("set-missing-crystal_resonance").textContent).toContain("未發現的寶物 ×2");
   });
 });
+
+describe("PR #11 P2", () => {
+  it("依序發現並出售所有成員（從未同時持有）：只顯示「圖鑑已發現全部成員」，不宣稱曾啟動套組", async () => {
+    const r = await mount();
+    for (const id of ["a_z1_lantern", "a_z1_badge", "a_z1_map"] as ArtifactId[]) {
+      r.backend.mutate(r.userId, (s) => give(s, id));
+      await r.controller.retryBootstrap();
+      expect(setRows(r.view().state).find((x) => x.id === "old_miner")!.active).toBe(false); // 每次只持有一件
+      r.backend.mutate(r.userId, (s) => void (s.heldArtifacts = []));
+      await r.controller.retryBootstrap();
+    }
+    const row = setRows(r.view().state).find((x) => x.id === "old_miner")!;
+    expect(row).toMatchObject({ allDiscovered: true, ownedNow: false, active: false, heldMembers: 0 });
+    expect(row).not.toHaveProperty("everCompleted");
+    await flush();
+    r.controller.dismissAllReveals(); // 測試中逐件寫入的寶物揭曉
+    r.wrap(<CollectionPage />);
+    sets();
+    expect(screen.getByTestId("set-discovered-old_miner").textContent).toContain("圖鑑已發現全部成員");
+    expect(screen.getByTestId("set-discovered-old_miner").dataset.ok).toBe("true");
+    expect(screen.getByTestId("set-active-old_miner").dataset.ok).toBe("false");
+    expect(screen.queryByText(/曾經集齊/)).toBeNull();
+  });
+
+  it("寶物詳情：開啟時焦點進入、Tab 不跳出、Escape 關閉並還原焦點；點背景關閉", async () => {
+    const r = await mount((s) => give(s, "a_z1_heart"));
+    r.wrap(<CollectionPage />);
+    const card = screen.getByTestId("artifact-a_z1_heart");
+    card.focus();
+    fireEvent.click(card);
+    const dialog = screen.getByRole("dialog", { name: "礦脈之心" });
+    const close = within(dialog).getByRole("button", { name: "關閉" });
+    expect(document.activeElement).toBe(close);
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    card.focus(); // 焦點跑到背景
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(card);
+    fireEvent.click(card);
+    fireEvent.click(within(screen.getByRole("dialog")).getByText("目前持有")); // 點內容不關閉
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("artifact-detail-backdrop"));
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(document.activeElement).toBe(card);
+  });
+
+  it("Legendary 配色：圖鑑卡與套組卡依 game-data 稀有度使用一致的標記", async () => {
+    const r = await mount((s) => {
+      for (const id of ARTIFACT_IDS) give(s, id);
+    });
+    r.wrap(<CollectionPage />);
+    const gridFlag = (id: ArtifactId) => screen.getByTestId(`artifact-${id}`).querySelector("svg")!.dataset.legendary === "true";
+    for (const id of ARTIFACT_IDS) expect(gridFlag(id), id).toBe(ARTIFACTS[id].rarity === "legendary");
+    const grid = Object.fromEntries(ARTIFACT_IDS.map((id) => [id, gridFlag(id)]));
+    sets();
+    for (const svg of document.querySelectorAll<SVGElement>('[data-testid^="set-"] svg[data-artifact]')) {
+      const id = svg.dataset.artifact as ArtifactId;
+      expect(svg.dataset.legendary === "true", id).toBe(grid[id]);
+      expect(svg.dataset.legendary === "true", id).toBe(ARTIFACTS[id].rarity === "legendary");
+    }
+  });
+});
+

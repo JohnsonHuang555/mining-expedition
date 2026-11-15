@@ -10,6 +10,7 @@
 | v1.3 | 首次保護 4 小時（D18）；引擎規則測試對照（D19）；離線報告領取流程與防卡住（D20）；架構定案（D21）；Docker-first 開發環境（D22）；數值版本管理 |
 | v1.4 | Game Engine Core：§5 補上整數取整與防溢位（BigInt）的精確定義；§6 定義 RNG_VERSION 1 的位元組順序、sfc32 初始化、拒絕取樣與各層區間；HMAC 使用 `@noble/hashes` 2.4.0（T4 定案，含實測與用途界線）；`rngSecret` 必須 32 bytes；GBS §2.3.1 邊界回訪；涵蓋率門檻（T11）；§3.4 依實作更新；§14 測試門檻與實作對齊；模擬器改用共用引擎（§14.4）。**遊戲規則與數值不變** |
 | v1.5 | Settlement & Actions Core：§7 依實作更新（`settle` / `applyAction` / `executeRequest`）；§8.1 `PlayerGameState` 定案；新增 §10.6 冪等與原子提交；§14.1.2 測試對照；§14.6 結算 benchmark；決策 D23（空的離線報告不建立）、D24（待領取期間暫停、不補算）；`validateState` 接受不可信輸入。**數值與 RNG_VERSION 不變** |
+| v1.13 | Artifact Reveal：§12.5 改為已實作的揭曉系統（佇列、去重、在線 / 離線資料流）；§12.13 套組旗標改為 `allDiscovered`（圖鑑已發現全部成員）、確認未發現寶物的揭露規則。**遊戲規則、掉落、首次保護、結算與 RNG_VERSION 不變** |
 | v1.12 | Collection & Artifact Sets：新增 §12.13 圖鑑與套組畫面（`/collection`）、未發現寶物的揭露規則（待確認）；`browserPendingStore.list()` 先取 key 快照再驗證。**遊戲規則、數值、套組加成與 RNG_VERSION 不變** |
 | v1.11 | Client Hardening：§12.6 未確認操作改為每筆一個 key + Web Locks 跨分頁排隊、待領報告的未確認領取優先調和、拒絕回應的 `synced`；新增 §12.11 跨分頁失敗模式、§12.12 帳號切換的 401。**遊戲規則、數值與 RNG_VERSION 不變** |
 | v1.10 | Inventory & Workshop：新增 §12.9 背包 / 工坊 / 製作畫面與路由（`/inventory`、`/workshop`，共用 `(game)` layout）、§12.10 出售價格來源。**遊戲規則、數值、成本、配方與 RNG_VERSION 不變** |
@@ -696,13 +697,31 @@ interface GameUiState {
 - 角色建立不是獨立路由：登入後 `game-state` 回 404 時在 `/` 顯示建立畫面。
 - `/dev`（診斷）與 `/dev/preview`（記憶體後端預覽各種畫面狀態）只在 `next dev` 存在；`/dev/preview` 以 `page.dev.tsx` 命名，正式 build 不產生路由與 bundle。
 
-### 12.5 動畫佇列
+### 12.5 寶物揭曉【v1.13 已實作】
 
-- 在線事件依方塊完成順序排入佇列。
-- Common 合併顯示在 Recent Loot；Rare 短暫閃光；Epic 通知；Legendary 全螢幕。【GDD §4.2】
-- Legendary 播放期間，後續事件繼續排隊。
-- 動畫只負責呈現，獎勵在伺服器回應時就已入帳。【GDD §7.4】
-- **MVP 現況**：Recent Loot 以顏色 / 符號區分稀有度，報告中的寶物有簡單的出現動畫；完整的動畫佇列與全螢幕揭曉留到後續 UI PR。
+- 稀有度只有 GBS §8.3 的 Epic / Legendary（Common / Rare 是礦物：Recent Loot 以顏色 / 符號區分，GDD §4.2）。
+  - Epic：水晶色像素卡片（名稱、圖示、礦區、EPIC、NEW DISCOVERY、首次寶物保護）。
+  - Legendary：全螢幕金色演出（緩慢旋轉的光芒 + 呼吸光暈 + 像素粒子；不使用快速閃爍）。
+  - `prefers-reduced-motion`：不播放動畫，直接顯示靜態卡片，標記與按鈕不變。
+- 佇列在 GameController（共用 runtime），不在頁面元件：換頁不會遺失；React Strict Mode 不會重複入列。畫面只顯示第一筆，「收下」換下一筆，另有「全部略過」「前往圖鑑」；Escape 關閉目前這筆；焦點限制在對話框內並在結束後還原（與 ConfirmDialog / 寶物詳情共用 `useDialogFocus`）。
+- 有待領報告時先顯示報告（D20），不顯示揭曉。演出不阻擋同步排程、不改變任何結算。
+
+**資料來源（只用伺服器確認的資料）**
+
+| 來源 | 時機 |
+|---|---|
+| `block_completed`（`instanceId`、`artifact` / `protection`、`isNewDiscovery`） | 在線結算（含操作前的結算） |
+| `report_claimed.artifactInstanceIds` + 領取前報告的 `rewards.artifacts` | `claim_report` 成功後（領取前不入列；報告已不在畫面時改用持有清單的實例資料） |
+| `heldArtifacts` 中新出現的實例（相對於第一次收到狀態時的最大 digCounter） | 沒有事件的情況：其他分頁 / 裝置取得、拒絕回應附帶的結算狀態、重新讀取 |
+
+**去重**：鍵是 `instanceId`（`d<digCounter>`，同一位玩家永不重複；同種寶物取得兩次是兩個鍵）。去重只影響 UI，不影響入帳。
+
+**保存（PR #12 Review 修正）**：依使用者、每個實例一個 `localStorage` key（`mining-expedition:reveal:v2:<userId>:q:<id>` 待播放、`…:s:<id>` 已播放、`…:floor`），不對單一 JSON 做 read-modify-write，多分頁同時入列 / 略過不會互相覆蓋。
+- 略過：先寫已播放、再刪待播放；讀取時**已播放優先**（晚到的舊入列會被清掉），所以入列與略過交錯時不會重播。
+- 待播放**不截斷**：全部保留到看完 / 略過；儲存空間不足的項目只保留在本分頁記憶體（仍會播放；略過後本分頁不重播）。
+- 已播放紀錄上限 200：在同帳號 Web Lock 內先提高 floor（只增不減）、再刪較舊的紀錄；仍有待播放項目 ≤ floor 時不清理；不支援 Web Lock 時不清理（保守）。
+- 重新整理時第一次收到的狀態只當基準，既有寶物不重播；未看完的佇列繼續播放。舊版 v1 資料會自動遷移。
+- NEW DISCOVERY 只在伺服器事件 / 報告明確標示時顯示；以持有清單補上的項目不推斷（中性）。
 
 ### 12.6 API Client 與錯誤處理【Playable MVP】
 
@@ -793,10 +812,10 @@ interface GameUiState {
 - 圖鑑進度 = 已發現種類 / 12（GBS §9、P19），另顯示三個礦區各 / 4。
 - 寶物卡：已發現（名稱、稀有度、礦區、持有數；持有 0 時標示「已發現，未持有」）／未發現（剪影 + `？？？`）。詳細：持有數、歷史發現次數、首次發現時間與深度、所屬套組、基礎估值（註明不是當日成交價）。
 - 篩選：狀態（全部 / 已發現 / 未發現）、礦區、稀有度；另有「套組」分頁。
-- 套組卡分開顯示三種狀態：曾經集齊（所有成員都在圖鑑）、目前持有全部成員、加成生效中；以及持有數 / 3、缺少的成員、完成加成（取自 `SETS`）。
+- 套組卡分開顯示三種狀態：**圖鑑已發現全部成員**（`allDiscovered`：每件都曾分別發現，不代表曾同時持有或曾啟動套組；目前沒有歷史啟動紀錄）、目前持有全部成員、加成生效中；以及持有數 / 3、缺少的成員、完成加成（取自 `SETS`）。
 - 實際能力值只顯示伺服器回傳的 `PlayerStateView.stats`；UI 不把加成套用到任何狀態。
 
-**未發現寶物的揭露規則（GDD 未定義，待確認）**：目前顯示礦區與稀有度（GBS §8.3 的公開資料，也讓「礦區完成率」與稀有度篩選有意義），隱藏名稱、配色與套組歸屬；剪影保留輪廓。若希望連稀有度也隱藏，只需調整 `CollectionPage` 的顯示。
+**未發現寶物的揭露規則（GDD 未定義；PR #11 Review 確認作為 MVP 取捨）**：目前顯示礦區與稀有度（GBS §8.3 的公開資料，也讓「礦區完成率」與稀有度篩選有意義），隱藏名稱、配色與套組歸屬；剪影保留輪廓。若希望連稀有度也隱藏，只需調整 `CollectionPage` 的顯示。
 
 ### 12.7 多分頁
 
