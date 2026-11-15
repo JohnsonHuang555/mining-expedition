@@ -43,7 +43,12 @@ const act = (token: string, command: GameCommand | Record<string, unknown>, key:
 async function newPlayer(): Promise<{ id: string; email: string; token: string }> {
   const u = await createUser();
   const { accessToken } = await signIn(u.email);
-  const r = await api("character-create", { token: accessToken });
+  // Supabase Local 的 Edge Runtime 在負載下偶爾回傳沒有內容的 5xx（不是遊戲 API 的回應）；建立角色是冪等的，可以安全重試
+  let r = await api("character-create", { token: accessToken });
+  for (let i = 0; i < 3 && r.status >= 502 && r.status <= 504 && r.body === null; i++) {
+    await new Promise((x) => setTimeout(x, 300));
+    r = await api("character-create", { token: accessToken });
+  }
   expect(r.status).toBe(201);
   return { ...u, token: accessToken };
 }
