@@ -1,8 +1,9 @@
 "use client";
 
 import type { ArtifactRarity } from "@mining/game-data";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ArtifactIcon } from "@/components/ui/artifact-icon";
+import { useDialogFocus } from "@/components/ui/dialog-focus";
 import { Panel, PixelBar, PixelButton } from "@/components/ui/pixel";
 import {
   type CollectionEntry,
@@ -138,9 +139,21 @@ function ArtifactGrid({ entries }: { entries: CollectionEntry[] }) {
 
 function ArtifactDetail({ entry: e, onClose }: { entry: CollectionEntry; onClose(): void }) {
   const set = setRows(useGame((s) => s.view!.state)).find((s) => s.id === e.set);
+  const panel = useRef<HTMLDivElement>(null);
+  const close = useRef<HTMLButtonElement>(null);
+  useDialogFocus(panel, onClose, close);
   return (
-    <div role="dialog" aria-modal="true" aria-label={e.discovery ? e.name : "未發現的寶物"} className="fixed inset-0 z-40 flex items-end justify-center bg-black/70 p-3 sm:items-center" onClick={onClose}>
-      <div className="pixel-frame animate-pop w-full max-w-sm p-4" onClick={(ev) => ev.stopPropagation()} data-testid="artifact-detail">
+    <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/70 p-3 sm:items-center" onClick={onClose} data-testid="artifact-detail-backdrop">
+      <div
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-label={e.discovery ? e.name : "未發現的寶物"}
+        tabIndex={-1}
+        className="pixel-frame animate-pop w-full max-w-sm p-4 outline-none"
+        onClick={(ev) => ev.stopPropagation()}
+        data-testid="artifact-detail"
+      >
         <div className="flex items-center gap-3">
           <ArtifactIcon id={e.id} discovered={!!e.discovery} zone={e.zone} legendary={e.rarity === "legendary"} size={64} />
           <div>
@@ -170,7 +183,7 @@ function ArtifactDetail({ entry: e, onClose }: { entry: CollectionEntry; onClose
           <p className="mt-3 text-sm text-parchment-dim">尚未發現。在{zoneName(e.zone)}挖掘時有機會取得。</p>
         )}
         {e.discovery && <p className="mt-2 text-[11px] text-parchment-dim">基礎估值不是當日成交價；寶物出售與每日市場價格將在後續版本開放。</p>}
-        <PixelButton tone="secondary" className="mt-4 w-full" onClick={onClose}>
+        <PixelButton tone="secondary" className="mt-4 w-full" onClick={onClose} ref={close}>
           關閉
         </PixelButton>
       </div>
@@ -221,7 +234,7 @@ function SetCard({ row: r }: { row: SetRow }) {
       <div className="mt-2 flex gap-2">
         {r.members.map((m) => (
           <div key={m.id} className={`flex flex-1 flex-col items-center gap-0.5 p-1 ${m.held > 0 ? "bg-crystal/15" : "bg-cave-950/60"}`} title={m.discovered ? names[m.id]!.name : "未發現"}>
-            <ArtifactIcon id={m.id} discovered={m.discovered} zone={names[m.id]!.zone} legendary={false} size={32} />
+            <ArtifactIcon id={m.id} discovered={m.discovered} zone={names[m.id]!.zone} legendary={names[m.id]!.rarity === "legendary"} size={32} />
             <span className="text-center text-[10px] leading-tight">{m.discovered ? names[m.id]!.name : "？？？"}</span>
             <span className="text-[10px] text-parchment-dim">{m.held > 0 ? `持有 ×${m.held}` : m.discovered ? "未持有" : "未發現"}</span>
           </div>
@@ -237,7 +250,7 @@ function SetCard({ row: r }: { row: SetRow }) {
         <div className={`h-full ${r.active ? "bg-moss" : "bg-ember"}`} style={{ width: pct(r.heldMembers / r.total) }} />
       </div>
       <ul className="mt-2 space-y-0.5 text-[11px]">
-        <Flag ok={r.everCompleted} label="曾經集齊（圖鑑）" testId={`set-ever-${r.id}`} />
+        <Flag ok={r.allDiscovered} label="圖鑑已發現全部成員" testId={`set-discovered-${r.id}`} />
         <Flag ok={r.ownedNow} label="目前持有全部成員" testId={`set-owned-${r.id}`} />
         <Flag ok={r.active} label="套組加成生效中" testId={`set-active-${r.id}`} />
       </ul>

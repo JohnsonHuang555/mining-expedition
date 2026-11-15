@@ -1,9 +1,8 @@
 "use client";
 
 import { type ReactNode, useEffect, useRef, useState } from "react";
+import { useDialogFocus } from "./dialog-focus";
 import { PixelButton } from "./pixel";
-
-const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * 重要交易的確認視窗（避免誤觸大量出售）。
@@ -35,39 +34,7 @@ export function ConfirmDialog({
   useEffect(() => {
     cancelRef.current = onCancel;
   });
-
-  useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    cancel.current?.focus();
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        cancelRef.current();
-        return;
-      }
-      if (e.key !== "Tab" || !dialog.current) return;
-      const items = [...dialog.current.querySelectorAll<HTMLElement>(FOCUSABLE)];
-      if (items.length === 0) return;
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      const active = document.activeElement;
-      if (!dialog.current.contains(active)) {
-        e.preventDefault();
-        first.focus();
-      } else if (e.shiftKey && active === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && active === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("keydown", onKey);
-      if (opener?.isConnected) opener.focus();
-    };
-  }, []);
+  useDialogFocus(dialog, () => cancelRef.current(), cancel);
 
   const blocked = disabled || submitted;
   return (

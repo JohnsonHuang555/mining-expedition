@@ -340,7 +340,7 @@ describe("Web Client × 真實 Supabase Local", () => {
     }
     await t.controller.retryBootstrap();
     const v2 = t.store.getState().view!;
-    expect(setRows(v2.state).find((x) => x.id === "old_miner")).toMatchObject({ heldMembers: 3, ownedNow: true, active: true, everCompleted: true });
+    expect(setRows(v2.state).find((x) => x.id === "old_miner")).toMatchObject({ heldMembers: 3, ownedNow: true, active: true, allDiscovered: true });
     // 3. 伺服器回傳的能力值包含套組加成（UI 不自行套用）；與引擎規則一致
     expect(v2.stats.speed1000).toBe(1_030);
     expect(v2.stats).toEqual(computeStats(v2.state.equippedPickaxe, v2.state.pickaxes[v2.state.equippedPickaxe]!, heldCounts(v2.state)));
@@ -354,7 +354,7 @@ describe("Web Client × 真實 Supabase Local", () => {
     expect(await t.controller.perform({ type: "sell_artifacts", instanceIds: badges })).toBe("ok");
     const v3 = t.store.getState().view!;
     const row = setRows(v3.state).find((x) => x.id === "old_miner")!;
-    expect(row).toMatchObject({ active: false, ownedNow: false, everCompleted: true });
+    expect(row).toMatchObject({ active: false, ownedNow: false, allDiscovered: true });
     expect(v3.stats.speed1000).toBe(1_000);
     expect(collectionEntries(v3.state).find((e) => e.id === "a_z1_badge")).toMatchObject({ held: 0, discovery: expect.objectContaining({ totalFound: expect.any(Number) }) });
 

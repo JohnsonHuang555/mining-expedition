@@ -19,10 +19,13 @@
  */
 
 import type { MiningMode } from "@mining/game-data";
-import { type GameCommand, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
+import { type GameCommand, type GameEvent, type OfflineReport, type ZoneIndex, predictBlockProgress } from "@mining/game-engine";
 import { type ApiResult, type GameApi, newRequestId } from "./api";
 import { type ActionLock, LOCK_TIMEOUT, type PendingAction, type PendingStore, memoryActionLock, memoryPendingStore, sameCommand } from "./pending";
+import { type RevealItem, RevealQueue } from "./reveal";
 import { type BusyOp, type GameStore, type GameUiState, initialUiState, lootFromEvents, mergeLoot } from "./store";
+import { ARTIFACTS } from "@mining/game-data";
+import type { PlayerGameState } from "@mining/game-engine";
 
 export const HEARTBEAT_MS = 20_000;
 export const BLOCK_SYNC_MIN_MS = 10_000;
@@ -50,6 +53,8 @@ export interface ControllerOptions {
   pendingStore?: PendingStore;
   /** 同一位使用者的交易在分頁之間排隊（Web Locks）；預設只在分頁內 */
   actionLock?: ActionLock;
+  /** 寶物揭曉佇列（依使用者保存）；預設只在記憶體 */
+  reveals?: RevealQueue;
   /** 登入失效（token 更新失敗）：導向登入頁 */
   onSignedOut?(): void;
   /** 分頁是否在前景 */
@@ -132,6 +137,10 @@ export class GameController {
   private readonly pendingStore: PendingStore;
   private readonly lock: ActionLock;
   private unsubscribePending: (() => void) | null = null;
+  private readonly reveals: RevealQueue;
+  private unsubscribeReveals: (() => void) | null = null;
+  /** 已知的最大寶物 digCounter（第一次收到狀態時設定）；之後新出現的實例才會揭曉 */
+  private revealBaseline: number | null = null;
   private readonly opts: ControllerOptions;
   private op: Promise<unknown> | null = null;
   private timer: unknown = null;
@@ -149,6 +158,9 @@ export class GameController {
     this.channel = opts.channel === undefined ? browserChannel() : opts.channel;
     this.pendingStore = opts.pendingStore ?? memoryPendingStore();
     this.lock = opts.actionLock ?? memoryActionLock();
+    this.reveals = opts.reveals ?? new RevealQueue();
+    this.set({ reveals: this.reveals.items() });
+    this.unsubscribeReveals = this.reveals.subscribe(() => this.set({ reveals: this.reveals.items() }));
     // 重新整理前（或其他分頁）未確認的操作：顯示，bootstrap / 下一次同步時調和
     this.refreshPending();
     this.unsubscribePending = this.pendingStore.subscribe?.(() => {
@@ -196,6 +208,8 @@ export class GameController {
     this.unsubscribe = null;
     this.unsubscribePending?.();
     this.unsubscribePending = null;
+    this.unsubscribeReveals?.();
+    this.unsubscribeReveals = null;
     this.channel?.close();
   }
 
@@ -340,6 +354,19 @@ export class GameController {
     this.set({ notice: null });
   }
 
+  /** 看完 / 略過目前的揭曉（只影響畫面） */
+  dismissReveal(key: string): void {
+    if (this.disposed) return;
+    this.reveals.dismiss(key);
+    this.set({ reveals: this.reveals.items() });
+  }
+
+  dismissAllReveals(): void {
+    if (this.disposed) return;
+    this.reveals.dismissAll();
+    this.set({ reveals: this.reveals.items() });
+  }
+
   // ---------------------------------------------------------------- 內部
 
   private refreshPending(): void {
@@ -424,7 +451,9 @@ export class GameController {
 
   private applyOk(r: Extract<ApiResult, { ok: true }>): void {
     const { body } = r;
+    const before = this.state.view?.state.pendingOfflineReport ?? null;
     this.applyView(r, true);
+    this.revealFromEvents(body.events, before, body.state.state);
     const blocks = lootFromEvents(body.events);
     const s = this.state;
     this.set({
@@ -437,6 +466,62 @@ export class GameController {
 
   private applyView(r: Extract<ApiResult, { ok: true }>, fresh: boolean): void {
     this.set({ view: r.body.state, fresh, receivedAt: this.clock.now(), phase: "ready", error: null });
+    this.revealNewlyHeld(r.body.state.state);
+  }
+
+  /**
+   * 伺服器回應中的寶物事件 → 揭曉。只用伺服器確認的資料（不使用預估進度、不在 Client 抽寶物）。
+   * - block_completed：在線取得（含首次保護）。
+   * - report_claimed：離線報告的寶物（領取成功後；寶物詳細資料取自領取前的報告，沒有時取自持有清單）。
+   * Replay 的回應會帶相同的事件：以 instanceId 去重。
+   */
+  private revealFromEvents(events: readonly GameEvent[], reportBefore: OfflineReport | null, state: PlayerGameState): void {
+    const items: RevealItem[] = [];
+    for (const e of events) {
+      if (e.type === "block_completed" && e.instanceId && (e.artifact || e.protection)) {
+        const artifactId = (e.artifact ?? e.protection)!;
+        items.push({ key: e.instanceId, digCounter: e.digCounter, artifactId, rarity: ARTIFACTS[artifactId].rarity, isNewDiscovery: e.isNewDiscovery, protection: e.protection !== null, origin: "online" });
+      }
+      if (e.type === "report_claimed") {
+        const fromReport = reportBefore?.reportId === e.reportId ? reportBefore.rewards.artifacts : [];
+        for (const id of e.artifactInstanceIds) {
+          const a = fromReport.find((x) => x.instanceId === id) ?? state.heldArtifacts.find((x) => x.instanceId === id);
+          if (!a) continue;
+          const isNew = "isNewDiscovery" in a ? (a as { isNewDiscovery: boolean }).isNewDiscovery : state.discoveredArtifacts[a.artifactId]?.firstDiscoveredAt === a.obtainedAt;
+          items.push({ key: a.instanceId, digCounter: a.digCounter, artifactId: a.artifactId, rarity: ARTIFACTS[a.artifactId].rarity, isNewDiscovery: isNew, protection: a.source === "first_treasure_protection", origin: "offline" });
+        }
+      }
+    }
+    if (items.length > 0 && this.reveals.enqueue(items) > 0) this.set({ reveals: this.reveals.items() });
+  }
+
+  /**
+   * 沒有事件的情況（其他分頁 / 裝置取得、拒絕回應附帶的結算狀態、重新讀取）：以持有清單中新出現的實例補上。
+   * 第一次收到狀態時只記錄基準，不揭曉既有的寶物（重新整理不重播）。
+   */
+  private revealNewlyHeld(state: PlayerGameState): void {
+    const max = state.heldArtifacts.reduce((m, a) => Math.max(m, a.digCounter), -1);
+    if (this.revealBaseline === null) {
+      this.revealBaseline = max;
+      return;
+    }
+    const baseline = this.revealBaseline;
+    this.revealBaseline = Math.max(baseline, max);
+    const fresh = state.heldArtifacts.filter((a) => a.digCounter > baseline);
+    if (fresh.length === 0) return;
+    const items: RevealItem[] = fresh.map((a) => ({
+      key: a.instanceId,
+      digCounter: a.digCounter,
+      artifactId: a.artifactId,
+      rarity: ARTIFACTS[a.artifactId].rarity,
+      isNewDiscovery: state.discoveredArtifacts[a.artifactId]?.firstDiscoveredAt === a.obtainedAt,
+      protection: a.source === "first_treasure_protection",
+      origin: a.obtainedAt < state.lastSettledAt - 300_000 ? "offline" : "online",
+    }));
+    // 先處理事件（資料較完整），這裡只補沒有事件的實例
+    queueMicrotask(() => {
+      if (!this.disposed && this.reveals.enqueue(items) > 0) this.set({ reveals: this.reveals.items() });
+    });
   }
 
   private markSyncOk(): void {
@@ -454,7 +539,10 @@ export class GameController {
       return;
     }
     // 遊戲規則拒絕時附上的狀態：顯示，但不是「現在」的狀態（不預測）
-    if (r.body?.state) this.set({ view: r.body.state, fresh: false, receivedAt: this.clock.now() });
+    if (r.body?.state) {
+      this.set({ view: r.body.state, fresh: false, receivedAt: this.clock.now() });
+      this.revealNewlyHeld(r.body.state.state); // 拒絕前的結算可能已經取得寶物（拒絕回應沒有事件）
+    }
     const transient = r.code === "NETWORK" || r.code === "SERVER_BUSY" || r.code === "VERSION_CONFLICT" || r.code === "BAD_RESPONSE";
     if (transient) {
       const failures = this.state.sync.failures + 1;

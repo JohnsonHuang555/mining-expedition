@@ -15,7 +15,9 @@ import { useController, useGame, usePrediction } from "./runtime-context";
 /** 所有遊戲頁面共用的外框：標題列、玩家資訊、操作結果提示、底部導覽 */
 export function GameFrame({ email, onSignOut, children }: { email: string | null; onSignOut(): void; children: ReactNode }) {
   const view = useGame((s) => s.view)!;
-  const blocked = view.state.pendingOfflineReport !== null;
+  const revealing = useGame((s) => s.reveals.length > 0);
+  // 待領報告或寶物揭曉顯示時，背景對輔助技術隱藏（焦點也被對話框限制在前景）
+  const blocked = view.state.pendingOfflineReport !== null || revealing;
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-4 p-3 pb-24 sm:p-6" aria-hidden={blocked || undefined}>
       <TopBar email={email} onSignOut={onSignOut} />

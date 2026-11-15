@@ -42,7 +42,7 @@ export function ArtifactIcon({ id, discovered, zone, legendary, size = 40 }: { i
   const [light, dark] = discovered ? (legendary ? ["#fde68a", "#b45309"] : (ZONE_COLORS[zone] ?? ZONE_COLORS[0]!)) : ["#4a2e1e", "#4a2e1e"];
   const rows = PIXELS[SHAPE[id]];
   return (
-    <svg viewBox="-1 -1 10 10" width={size} height={size} className="pixelated shrink-0" aria-hidden="true" data-silhouette={!discovered || undefined}>
+    <svg viewBox="-1 -1 10 10" width={size} height={size} className="pixelated shrink-0" aria-hidden="true" data-artifact={id} data-silhouette={!discovered || undefined} data-legendary={discovered && legendary ? "true" : undefined}>
       {discovered && legendary && <rect x="-1" y="-1" width="10" height="10" fill="#fcd34d" opacity="0.15" />}
       {rows.flatMap((row, y) =>
         [...row].map((c, x) => (c === "." ? null : <rect key={`${x}-${y}`} x={x} y={y} width="1" height="1" fill={c === "L" ? light : dark} opacity={discovered ? 1 : 0.85} />)),

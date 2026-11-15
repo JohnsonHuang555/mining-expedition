@@ -72,7 +72,7 @@ test("圖鑑與套組：挖到寶物 → 圖鑑更新 → 集齊套組 → 加�
   await page.reload();
   await page.getByRole("tab", { name: "套組" }).click();
   await expect(page.getByTestId("set-status-old_miner")).toHaveText("未生效");
-  await expect(page.getByTestId("set-ever-old_miner")).toHaveAttribute("data-ok", "true");
+  await expect(page.getByTestId("set-discovered-old_miner")).toHaveAttribute("data-ok", "true");
   await expect(page.getByTestId("sets-speed")).toHaveText("×1.00");
   await page.getByRole("tab", { name: "寶物" }).click();
   await expect(page.getByTestId("artifact-a_z1_badge")).toHaveAttribute("data-discovered", "true");
