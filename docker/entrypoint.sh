@@ -23,6 +23,12 @@ fi
 if [ "$target_gid" -ne 0 ] && [ "$target_gid" -ne "$(id -g node)" ]; then
   groupmod -o -g "$target_gid" node
 fi
+# repo 屬於 root（Windows 經 Docker Desktop 掛載時一律是 0:0，無法對應 UID）：
+# 讓 git 信任這一個路徑，否則 node 使用者執行 git 會出現 dubious ownership（pnpm cloud 的 git 檢查會失敗）。
+# 寫在容器的 system gitconfig，容器結束即丟棄，不影響宿主。
+if [ "$target_uid" -eq 0 ]; then
+  git config --system --add safe.directory "$workdir"
+fi
 chown node:node /pnpm-store /pnpm-home 2>/dev/null || true
 if [ -d /home/node/.supabase ]; then chown node:node /home/node/.supabase 2>/dev/null || true; fi
 
