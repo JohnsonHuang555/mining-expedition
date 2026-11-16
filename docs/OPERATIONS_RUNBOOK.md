@@ -15,6 +15,8 @@ docker compose run --rm -e CLOUD_DB_URL dev pnpm cloud verify # 結構、權限�
 docker compose run --rm -e CLOUD_DB_URL dev pnpm cloud report # 排程結果、積壓、市場、連線
 ```
 
+每個指令最後一行是狀態：`VERIFY_STATUS=PASSED|FAILED|NOT_RUN`、`REPORT_STATUS=COMPLETED|FAILED|NOT_RUN`（exit 0 / 1 / 2）。**`NOT_RUN` 代表沒有連到資料庫、什麼都沒檢查**，不可記錄為通過。
+
 不想在本機使用連線字串：把 `supabase/ops/verify-cloud.sql`、`supabase/ops/ops-report.sql`（刪除 `\echo` 行）貼到 Supabase Dashboard → SQL Editor 執行，結果相同。
 
 | 指標 | 正常 | 異常時 |
@@ -101,6 +103,8 @@ dev pnpm cloud backup
 #   supabase db dump --linked -f data.sql --use-copy --data-only --schema public,private,supabase_migrations
 ```
 
+這是**遊戲資料的邏輯備份，不是完整的環境還原點**：不含 `auth.users`，單獨還原時玩家無法登入、`players.id` 也對不到帳號。需要完整還原時，另外匯出 `auth` schema（含個資，評估處理方式），並在 §5.3 的演練中驗證帳號與玩家資料的對應。
+
 輸出檔含玩家資料與 `private` 密鑰表：只存放在加密的位置（加密磁碟、密碼管理器附件），不提交 Git、不上傳到公開位置。建議在每次套用 migration 之前執行一次。
 
 必須包含並在還原後檢查：
@@ -125,6 +129,8 @@ dev pnpm cloud backup
    - 玩家資產一致：抽樣比對 `players.coins`、`artifact_instances` 數量、`offline_reports` 狀態與備份前的查詢結果。
    - **冪等性**：從 `action_log` 取一筆已提交的交易，以同一個 player 的同一個 `idempotency_key` 呼叫 `game_load_snapshot(player, key, request_hash)` → 必須是 `replay` 或 `expired`，不可是 `ok`（即不會重新執行）。
    - 市場：`market_secret` 相同 → 下一個市場日的價格與原環境產生的一致。
+   - 帳號歸屬：若同時還原 `auth.users`，抽樣確認 `players.id` 都能對到 `auth.users.id`；沒有還原 auth 時，記錄「帳號未還原」，不可標示為完整還原。
+   - `private.player_secrets` 筆數與 `players` 相同；`private.market_secret` 恰好一筆。
 4. 演練結束後刪除專案。
 
 **狀態**：尚未執行（需要建立隔離專案與授權）→ 驗收為 **Blocked**。

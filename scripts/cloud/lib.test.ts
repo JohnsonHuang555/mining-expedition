@@ -95,3 +95,20 @@ test("secrets list：只依名稱判斷", () => {
   assert.equal(hasSecret(out, "GAME_API_ALLOWED"), false);
   assert.equal(hasSecret("", "GAME_API_ALLOWED_ORIGIN"), false);
 });
+
+test("狀態：NOT_RUN 不是成功（exit 2）；db --apply 摘要分開列出 migration 與驗證", async () => {
+  const { EXIT_CODE, applySummary, isLocalDbUrl } = await import("./lib.ts");
+  assert.deepEqual([EXIT_CODE.PASSED, EXIT_CODE.COMPLETED, EXIT_CODE.FAILED, EXIT_CODE.NOT_RUN], [0, 0, 1, 2]);
+  const passed = applySummary(["a.sql"], "PASSED");
+  assert.equal(passed.exitCode, 0);
+  assert.ok(passed.lines.includes("DEPLOY_STATUS=MIGRATION_APPLIED_VERIFIED"));
+  const notRun = applySummary(["a.sql", "b.sql"], "NOT_RUN");
+  assert.equal(notRun.exitCode, 2);
+  assert.deepEqual(notRun.lines.slice(1), ["MIGRATIONS_APPLIED=2", "VERIFY_STATUS=NOT_RUN", "DEPLOY_STATUS=MIGRATION_APPLIED_VERIFY_NOT_RUN"]);
+  const failed = applySummary(["a.sql"], "FAILED");
+  assert.equal(failed.exitCode, 1);
+  assert.equal(failed.lines.at(-1), "DEPLOY_STATUS=MIGRATION_APPLIED_VERIFY_FAILED");
+  assert.equal(isLocalDbUrl("postgresql://postgres:postgres@127.0.0.1:54322/postgres"), true);
+  assert.equal(isLocalDbUrl("postgresql://u:p@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"), false);
+  assert.equal(isLocalDbUrl("not a url"), false);
+});

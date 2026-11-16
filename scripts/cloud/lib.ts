@@ -153,3 +153,35 @@ export function buildEdgeSecrets(cfg: Record<string, string | undefined>): { sec
 export function hasSecret(listOutput: string, name: string): boolean {
   return new RegExp(`(^|[\\s|])${name}([\\s|]|$)`, "m").test(listOutput);
 }
+
+/**
+ * 檢查結果的三種狀態。NOT_RUN（例如沒有提供 CLOUD_DB_URL）絕對不是成功：
+ * exit code 不同（0 / 1 / 2），並在最後一行輸出機器可讀的 `<NAME>_STATUS=<狀態>`。
+ */
+export type CheckStatus = "PASSED" | "FAILED" | "NOT_RUN";
+export type ReportStatus = "COMPLETED" | "FAILED" | "NOT_RUN";
+export const EXIT_CODE = { PASSED: 0, COMPLETED: 0, FAILED: 1, NOT_RUN: 2 } as const;
+
+/** `db --apply` 的最終摘要：migration 已提交不等於部署已驗收 */
+export function applySummary(applied: readonly string[], verify: CheckStatus): { lines: string[]; exitCode: number } {
+  const deploy = verify === "PASSED" ? "MIGRATION_APPLIED_VERIFIED" : verify === "FAILED" ? "MIGRATION_APPLIED_VERIFY_FAILED" : "MIGRATION_APPLIED_VERIFY_NOT_RUN";
+  const note =
+    verify === "PASSED"
+      ? "Migration 已套用，資料庫驗證通過。"
+      : verify === "FAILED"
+        ? "Migration 已套用（不會回滾），但資料庫驗證失敗：依上方列出的問題用新的 migration 往前修。"
+        : "Migration 已套用（不會回滾），但資料庫驗證「沒有執行」：這不是驗收通過。請用 SQL Editor 執行 supabase/ops/verify-cloud.sql，或提供 CLOUD_DB_URL 後執行 pnpm cloud verify。";
+  return {
+    lines: [note, `MIGRATIONS_APPLIED=${applied.length}`, `VERIFY_STATUS=${verify}`, `DEPLOY_STATUS=${deploy}`],
+    exitCode: EXIT_CODE[verify],
+  };
+}
+
+/** 本機資料庫（Supabase Local / CI）不使用 TLS；其他一律 TLS */
+export function isLocalDbUrl(url: string): boolean {
+  try {
+    return ["localhost", "127.0.0.1", "[::1]", "::1", "host.docker.internal"].includes(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}

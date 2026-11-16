@@ -28,8 +28,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - name: Cloud deploy script (project ref guard, dry-run plan, secrets) + config audit (CI never deploys)
-        run: node --test scripts/cloud/lib.test.ts scripts/cloud/config-audit.test.ts
+      - name: Cloud deploy script (project ref guard, dry-run plan, secrets, PASSED/FAILED/NOT_RUN exit codes) + config audit (CI never deploys)
+        run: node --test scripts/cloud/lib.test.ts scripts/cloud/cli.test.ts scripts/cloud/config-audit.test.ts
       - name: Engine coverage (T11：lines ≥ 90%)
         run: pnpm --filter @mining/game-engine coverage
       - name: Engine determinism (Node vs fixture)

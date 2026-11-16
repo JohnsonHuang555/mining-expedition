@@ -19,6 +19,7 @@
     "scripts/cloud/lib.ts",
     "scripts/cloud/lib.test.ts",
     "scripts/cloud/deploy.ts",
-    "scripts/cloud/config-audit.test.ts"
+    "scripts/cloud/config-audit.test.ts",
+    "scripts/cloud/cli.test.ts"
   ]
 }

@@ -9,6 +9,9 @@
  *   pnpm cloud functions --ref <ref>                部署 4 個 Edge Functions
  *   pnpm cloud verify                               唯讀：資料庫安全驗證（需要 CLOUD_DB_URL；或用 SQL Editor）
  *   pnpm cloud report                               唯讀：cron 結果、積壓、市場、連線
+ *
+ * verify / report / db --apply 的結果分開標示，最後一行輸出 VERIFY_STATUS= / REPORT_STATUS=：
+ *   exit 0 = PASSED / COMPLETED；exit 1 = FAILED；exit 2 = NOT_RUN（沒有連到資料庫，「不是」成功）
  *   pnpm cloud smoke                                部署後的最小 smoke test
  *   pnpm cloud backup                               唯讀：邏輯備份（roles / schema / data）到 backups/（gitignored）
  *
@@ -25,12 +28,17 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import {
+  type CheckStatus,
+  EXIT_CODE,
+  type ReportStatus,
+  applySummary,
   assertSafeSupabaseArgs,
   buildEdgeSecrets,
   checkGit,
   checkTarget,
   cliMajor,
   hasSecret,
+  isLocalDbUrl,
   parseEnvFile,
   pendingMigrations,
   planId,
@@ -127,51 +135,65 @@ function dryRun(): { names: string[]; plan: string } {
   return { names, plan: planId(names, migrationContents(names)) };
 }
 
-async function withDb<T>(cfg: Record<string, string | undefined>, file: string, fn: (q: (sql: string) => Promise<unknown>) => Promise<T>): Promise<T | null> {
+type DbResult<T> = { ran: false } | { ran: true; value: T };
+
+/** 沒有 CLOUD_DB_URL → { ran: false }（NOT_RUN）；連線或查詢錯誤會 throw（由呼叫端記為 FAILED） */
+async function withDb<T>(cfg: Record<string, string | undefined>, file: string, fn: (q: (sql: string) => Promise<unknown>) => Promise<T>): Promise<DbResult<T>> {
   if (!cfg.CLOUD_DB_URL) {
     console.log(
       [
-        "  沒有設定 CLOUD_DB_URL（只接受環境變數，不從檔案讀取）。兩種做法：",
+        "  沒有設定 CLOUD_DB_URL（只接受環境變數，不從檔案讀取），所以這次「沒有」連到資料庫。兩種做法：",
         `  A. Supabase Dashboard → SQL Editor → 貼上 ${file} 的內容 → Run（不需要資料庫密碼）`,
         "  B. 在這個終端機 session：read -rs CLOUD_DB_URL && export CLOUD_DB_URL  （貼上 Session pooler 連線字串，不會顯示）",
         "     然後重新執行這個指令。不要把連線字串寫進檔案或貼到對話。",
       ].join("\n"),
     );
-    return null;
+    return { ran: false };
   }
   const { default: pg } = await import("pg");
+  const local = isLocalDbUrl(cfg.CLOUD_DB_URL);
   const ca = cfg.CLOUD_DB_CA_FILE ? readFileSync(resolve(ROOT, cfg.CLOUD_DB_CA_FILE), "utf8") : undefined;
-  if (!ca) info("（未設定 CLOUD_DB_CA_FILE：使用 TLS 加密但不驗證伺服器憑證；可從 Dashboard → Database Settings 下載 CA 後設定）");
-  const client = new pg.Client({ connectionString: cfg.CLOUD_DB_URL, ssl: ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false } });
+  if (!local && !ca) info("（未設定 CLOUD_DB_CA_FILE：使用 TLS 加密但不驗證伺服器憑證；可從 Dashboard → Database Settings 下載 CA 後設定）");
+  const ssl = local ? false : ca ? { ca, rejectUnauthorized: true } : { rejectUnauthorized: false };
+  const client = new pg.Client({ connectionString: cfg.CLOUD_DB_URL, ssl, connectionTimeoutMillis: 15_000 });
   client.on("notice", (n) => info(`notice: ${n.message}`));
   await client.connect();
   try {
-    return await fn((sql) => client.query(sql));
+    return { ran: true, value: await fn((sql) => client.query(sql)) };
   } finally {
-    await client.end();
+    await client.end().catch(() => undefined);
   }
 }
 
 const opsSql = (name: string) => readFileSync(join(ROOT, "supabase/ops", name), "utf8");
 
-async function verify(cfg: Record<string, string | undefined>): Promise<boolean | null> {
+/** 資料庫安全驗證：PASSED / FAILED / NOT_RUN（NOT_RUN 不是成功） */
+async function verify(cfg: Record<string, string | undefined>): Promise<CheckStatus> {
   step("資料庫安全驗證（唯讀：RLS、Client 權限、函式權限、密鑰表、索引、cron）");
   const sql = opsSql("verify-cloud.sql");
-  return withDb(cfg, "supabase/ops/verify-cloud.sql", async (q) => {
-    try {
+  let status: CheckStatus;
+  try {
+    const r = await withDb(cfg, "supabase/ops/verify-cloud.sql", async (q) => {
       const res = (await q(sql)) as { command: string; rows: Record<string, unknown>[] }[];
-      const summary = res.find((r) => r.command === "SELECT")?.rows[0];
-      ok("驗證通過");
-      if (summary) console.table(summary);
-      return true;
-    } catch (e) {
-      console.error(`✗ ${(e as Error).message}`);
-      return false;
+      return res.find((x) => x.command === "SELECT")?.rows[0];
+    });
+    if (!r.ran) {
+      console.log("⚠ 資料庫驗證沒有執行（NOT_RUN）：這不代表通過");
+      status = "NOT_RUN";
+    } else {
+      ok("驗證通過（PASSED）");
+      if (r.value) console.table(r.value);
+      status = "PASSED";
     }
-  });
+  } catch (e) {
+    console.error(`✗ 驗證失敗（FAILED）：${(e as Error).message}`);
+    status = "FAILED";
+  }
+  return status;
 }
 
-async function report(cfg: Record<string, string | undefined>): Promise<void> {
+/** 營運報告：COMPLETED / FAILED / NOT_RUN */
+async function report(cfg: Record<string, string | undefined>): Promise<ReportStatus> {
   step("營運報告（唯讀）");
   const sections: { label: string; sql: string }[] = [];
   let label = "";
@@ -185,18 +207,29 @@ async function report(cfg: Record<string, string | undefined>): Promise<void> {
     } else if (!line.startsWith("\\")) buf.push(line);
   }
   sections.push({ label, sql: buf.join("\n") });
-  await withDb(cfg, "supabase/ops/ops-report.sql", async (q) => {
-    for (const s of sections) {
-      if (!s.sql.replace(/--.*$/gm, "").trim()) continue;
-      const res = (await q(s.sql)) as { command: string; rows: unknown[] } | { command: string; rows: unknown[] }[];
-      for (const r of Array.isArray(res) ? res : [res]) {
-        if (r.command !== "SELECT") continue;
-        if (s.label) console.log(`\n${s.label}`);
-        if (r.rows.length) console.table(r.rows);
-        else info("（沒有資料）");
+  try {
+    const r = await withDb(cfg, "supabase/ops/ops-report.sql", async (q) => {
+      for (const s of sections) {
+        if (!s.sql.replace(/--.*$/gm, "").trim()) continue;
+        const res = (await q(s.sql)) as { command: string; rows: unknown[] } | { command: string; rows: unknown[] }[];
+        for (const x of Array.isArray(res) ? res : [res]) {
+          if (x.command !== "SELECT") continue;
+          if (s.label) console.log(`\n${s.label}`);
+          if (x.rows.length) console.table(x.rows);
+          else info("（沒有資料）");
+        }
       }
+    });
+    if (!r.ran) {
+      console.log("⚠ 營運報告沒有執行（NOT_RUN）：沒有讀取任何 cron / 積壓資料");
+      return "NOT_RUN";
     }
-  });
+    ok("營運報告完成（COMPLETED）");
+    return "COMPLETED";
+  } catch (e) {
+    console.error(`✗ 營運報告失敗（FAILED）：${(e as Error).message}`);
+    return "FAILED";
+  }
 }
 
 async function httpJson(url: string, headers: Record<string, string> = {}): Promise<{ status: number; body: unknown }> {
@@ -311,9 +344,10 @@ async function main(): Promise<void> {
       ok("Migration 已套用");
       const after = supabase(["migration", "list", "--linked"], { capture: true });
       console.log(after.out.trim());
-      const v = await verify(cfg);
-      if (v === false) fail("資料庫驗證失敗（見上方列出的問題）");
-      if (v === null) console.log("\n! 尚未執行資料庫驗證：請依上方說明用 SQL Editor 執行 verify-cloud.sql");
+      const summary = applySummary(names, await verify(cfg));
+      step("摘要");
+      for (const l of summary.lines) console.log(l);
+      process.exitCode = summary.exitCode;
       return;
     }
 
@@ -355,14 +389,18 @@ async function main(): Promise<void> {
     }
 
     case "verify": {
-      const v = await verify(cfg);
-      if (v === false) throw new Stop();
+      const status = await verify(cfg);
+      console.log(`VERIFY_STATUS=${status}`);
+      process.exitCode = EXIT_CODE[status];
       return;
     }
 
-    case "report":
-      await report(cfg);
+    case "report": {
+      const status = await report(cfg);
+      console.log(`REPORT_STATUS=${status}`);
+      process.exitCode = EXIT_CODE[status];
       return;
+    }
 
     case "backup": {
       step("邏輯備份（唯讀：supabase db dump）");
@@ -382,7 +420,7 @@ async function main(): Promise<void> {
         if (supabase(["db", "dump", "--linked", "-f", join(dir, file), ...extra]).status !== 0) fail(`db dump ${file} 失敗`);
         if (existsSync(join(dir, file))) chmodSync(join(dir, file), 0o600);
       }
-      ok(`備份完成：${dir}`);
+      ok(`遊戲資料邏輯備份完成（非完整環境還原點）：${dir}`);
       info("內含玩家資料與 private 密鑰表：只存放在加密的位置（例如加密磁碟 / 密碼管理器的附件），不要提交 Git、不要上傳到公開位置");
       info("不含 auth.users（帳號）；需要時另外匯出並評估個資處理（docs/OPERATIONS_RUNBOOK.md §5）");
       return;

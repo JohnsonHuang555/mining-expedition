@@ -163,6 +163,25 @@ dev pnpm cloud smoke                        # ⑥ 最小 smoke test
   unset CLOUD_DB_URL
   ```
 
+**驗證結果有三種，「沒有執行」不是成功**：
+
+| 狀態（最後一行） | exit code | 意思 |
+|---|---|---|
+| `VERIFY_STATUS=PASSED` | 0 | 已連到資料庫，所有檢查通過 |
+| `VERIFY_STATUS=FAILED` | 1 | 有檢查不通過，或連不上資料庫（會列出原因） |
+| `VERIFY_STATUS=NOT_RUN` | 2 | 沒有提供 `CLOUD_DB_URL`，**完全沒有檢查**；請改用 SQL Editor 或提供連線字串後重跑 |
+
+`pnpm cloud report` 相同：`REPORT_STATUS=COMPLETED`（0）/ `FAILED`（1）/ `NOT_RUN`（2）。
+`db --apply` 套用 migration 後也會自動嘗試驗證，最後的摘要分開列出：
+
+```
+MIGRATIONS_APPLIED=1
+VERIFY_STATUS=NOT_RUN
+DEPLOY_STATUS=MIGRATION_APPLIED_VERIFY_NOT_RUN     ← exit 2：migration 已提交（不會回滾），但還沒驗收
+```
+
+`DEPLOY_STATUS` 只有 `MIGRATION_APPLIED_VERIFIED`（exit 0）代表套用並驗證通過。exit 2 時**不要重新套用**（再跑 `pnpm cloud db` 會顯示沒有待套用的 migration），只要補做驗證。用 SQL Editor 驗證通過後，在部署紀錄寫下「verify：SQL Editor 通過」。
+
 **⑥ smoke test** 不需要任何帳號就能跑基本檢查（health、未登入 → 401、CORS 只允許你的網址）。想多測登入後的流程，建立一個測試帳號（§2.5），在終端機臨時提供：
 
 ```sh
@@ -231,6 +250,7 @@ dev pnpm cloud smoke
 | 檢查 | 說明 |
 |---|---|
 | 目標專案 | 會修改遠端的指令都需要 `--ref`，且必須等於 `.env.cloud` 的 `CLOUD_PROJECT_REF`、等於 `supabase link` 的專案、不在 `CLOUD_BLOCKED_REFS` |
+| 結果狀態 | `verify` / `report` / `db --apply` 分開輸出 PASSED（COMPLETED）/ FAILED / NOT_RUN 與不同的 exit code（0 / 1 / 2）；未驗證不會被當成成功（CLI 回歸測試 `scripts/cloud/cli.test.ts`） |
 | 程式碼來源 | 必須沒有未提交的變更，且 HEAD = `origin/main`（緊急時可加 `--allow-unmerged` 略過後者，前者不能略過） |
 | Migration | 一律先 dry-run；`--apply` 需要 dry-run 的計畫 ID（含 migration 檔名與內容的雜湊），計畫改變就拒絕 |
 | 禁止的指令 | `db reset`、`migration repair`、`migration squash`、`db pull`、`--db-url` 一律拒絕；沒有任何會刪除玩家資料的指令 |
@@ -267,7 +287,7 @@ CI 的 `scripts/cloud/config-audit.test.ts` 會檢查：GitHub Actions 沒有任
 | 前端回滾 | Vercel → Deployments → 上一個正常的 Production 部署 → **Instant Rollback**（Hobby 方案可能只能回到前一個部署，以後台為準）；之後在 main revert 該 PR，避免下次部署又帶回問題 |
 | Edge Functions 回滾 | `git switch --detach <上一個正常的 commit>` → `dev pnpm cloud functions --ref <ref> --allow-unmerged` → 回到 main 並 revert |
 | 資料庫 | 只能往前修（新的 migration）；**禁止 `db reset`** |
-| 備份 | `dev pnpm cloud backup`（唯讀 `supabase db dump`，輸出到 `backups/`，已 gitignore；含玩家資料，請放在加密的位置）。Free 方案沒有可下載的每日備份 |
+| 備份 | `dev pnpm cloud backup`：**遊戲資料的邏輯備份，不是完整的環境還原點**（唯讀 `supabase db dump`：roles、schema、`public` / `private` / migration 歷史；**不含 `auth.users`**，所以單獨還原無法恢復登入與玩家歸屬）。輸出到 `backups/`（已 gitignore；含玩家資料與密鑰表，請放在加密的位置）。Free 方案沒有可下載的每日備份；完整還原演練見 runbook §5.3（首次 Cloud 驗收項目） |
 | 還原演練 | 只在另外建立的、可拋棄的專案進行，不覆蓋測試專案 |
 | Cron 驗證 | `dev pnpm cloud verify`（排程存在且設定正確）+ `dev pnpm cloud report`（最近 24 小時的執行結果、積壓、今天的市場價格）；或把 SQL 貼到 SQL Editor |
 
@@ -283,15 +303,17 @@ CI 的 `scripts/cloud/config-audit.test.ts` 會檢查：GitHub Actions 沒有任
 | `dev pnpm cloud db --apply --ref <ref> --plan <id>` | **是** | 套用 migration |
 | `dev pnpm cloud secrets --ref <ref>` | **是** | Edge secrets（CORS、限流、逾時） |
 | `dev pnpm cloud functions --ref <ref> [--only a,b]` | **是** | 部署 Edge Functions |
-| `dev pnpm cloud verify` | 否 | 資料庫安全驗證（需要 `CLOUD_DB_URL`，或用 SQL Editor） |
-| `dev pnpm cloud report` | 否 | 營運報告 |
+| `dev pnpm cloud verify` | 否 | 資料庫安全驗證（需要 `CLOUD_DB_URL`，或用 SQL Editor）；exit 0 PASSED / 1 FAILED / 2 NOT_RUN |
+| `dev pnpm cloud report` | 否 | 營運報告；exit 0 COMPLETED / 1 FAILED / 2 NOT_RUN |
 | `dev pnpm cloud smoke` | 測試帳號的遊戲狀態會前進（同步） | 最小 smoke test |
-| `dev pnpm cloud backup` | 否 | 邏輯備份到 `backups/` |
+| `dev pnpm cloud backup` | 否 | 遊戲資料邏輯備份到 `backups/`（不含 `auth.users`） |
 
 常見錯誤：
 
 | 訊息 | 處理 |
 |---|---|
+| `VERIFY_STATUS=NOT_RUN` / `REPORT_STATUS=NOT_RUN`（exit 2） | 沒有提供 `CLOUD_DB_URL`，什麼都沒檢查：用 SQL Editor 執行同一份 SQL，或提供連線字串後重跑 |
+| `DEPLOY_STATUS=MIGRATION_APPLIED_VERIFY_NOT_RUN` | migration 已套用；**不要重套**，只要補做驗證 |
 | `尚未連結專案` / `目前連結的專案是…` | `dev pnpm cloud link` |
 | `不是 origin/main` | `git switch main && git pull` |
 | `計畫已改變` | 重新執行 `dev pnpm cloud db` 並確認新的清單 |

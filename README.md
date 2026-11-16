@@ -300,6 +300,7 @@ dev pnpm cloud smoke
 
 - Vercel 只需要 `NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY`（建議再加 `NEXT_PUBLIC_SIGNUP_ENABLED=false`、`NEXT_PUBLIC_APP_ENV=test`）。不要設定 service role key 或 `SUPABASE_INTERNAL_URL`。
 - 部署工具永遠不執行 `db reset`；migration 一定先 dry-run，套用時計畫必須相同。
+- `verify` / `report` 沒有連到資料庫時是 `NOT_RUN`（exit 2），**不是成功**；`db --apply` 的摘要會分開列出 migration 與驗證狀態。
 - 營運、備份、回滾、cron 檢查：[`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md)；部署後驗證：[`docs/CLOUD_SMOKE_TEST.md`](docs/CLOUD_SMOKE_TEST.md)。
 
 本地模擬 Vercel 的建置方式（不需要 Vercel 帳號）：
