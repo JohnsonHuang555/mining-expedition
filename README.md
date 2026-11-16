@@ -142,7 +142,7 @@ docker compose run --rm dev pnpm verify:hot-reload     # 8. 驗證 Hot Reload
 | `SUPABASE_INTERNAL_URL` | `http://supabase_kong_mining-expedition:8000`（web 容器經 Supabase 的 Docker 網路使用） | **不設定**（自動改用 `NEXT_PUBLIC_SUPABASE_URL`） |
 | `EDGE_DIAGNOSTICS`（Edge Functions） | `supabase/config.toml` 的 `[edge_runtime.secrets]` 設為 `true` | **不設定**（健康檢查只回傳 `{"ok": boolean}`） |
 | `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`（Edge Functions） | CLI 自動注入 | Supabase Cloud 自動注入 |
-| 自訂 secret（Edge Functions） | `supabase/functions/.env` | `supabase secrets set` |
+| 自訂 secret（Edge Functions） | `supabase/functions/.env` | `pnpm cloud secrets --ref <ref>`（依 `.env.cloud`） |
 
 - 本地與正式使用不同的檔案與設定位置，彼此不會互相讀取。
 - `.env`、`apps/web/.env.local`、`supabase/functions/.env` 都在 `.gitignore`；只提交 `*.example`。
@@ -274,50 +274,40 @@ docker run --rm --network host --ipc=host -v "$PWD:$PWD" -w "$PWD/tests/e2e" \
 
 ---
 
-## 部署（正式環境）
+## 部署（單人開發版）
 
-正式環境：**Vercel**（`apps/web`）+ **Supabase Cloud**（資料庫與 Edge Functions）。兩者獨立部署，都不使用 Docker 開發設定。
+完整步驟：**[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)**（第一次設定約 40 分鐘）。
 
-> 目前只確認了部署相容性，尚未建立正式的 Vercel 或 Supabase 專案。
-
-### Vercel（apps/web）
-
-| 設定 | 值 |
+| 部分 | 怎麼部署 |
 |---|---|
-| Root Directory | `apps/web` |
-| Include source files outside of the Root Directory in the Build Step | **啟用**（需要讀取 `packages/`） |
-| Framework Preset | Next.js |
-| Install Command | 預設（Vercel 依 repo 根目錄的 `pnpm-lock.yaml` 使用 pnpm 安裝整個 workspace） |
-| Build Command | 預設（`next build`，即 `apps/web` 的 `pnpm build`） |
-| Output Directory | 預設 |
-| Node.js Version | 22.x |
-| Environment Variables | `NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY`（Production 與 Preview 指向不同的 Supabase 專案） |
+| 前端（`apps/web`） | **Vercel** 連接 GitHub `main`，merge 後自動部署（Root Directory `apps/web`，Node 22.x） |
+| 資料庫、Edge Functions | **Supabase Cloud（測試專案）**，在本機開發容器內用 `pnpm cloud` 手動部署，每次遠端修改都要再輸入一次 project ref |
+| GitHub Actions | 只跑 CI，不部署、不需要雲端密鑰 |
 
-- 共用 packages 以 TypeScript 原始碼提供，由 `next.config.ts` 的 `transpilePackages` 轉譯；`outputFileTracingRoot` / `turbopack.root` 指向 monorepo 根目錄。
-- 若要讓 Vercel 使用與本地相同的 pnpm 版本（`packageManager: pnpm@10.34.9`），可加環境變數 `ENABLE_EXPERIMENTAL_COREPACK=1`。
-- 不要設定 `SUPABASE_INTERNAL_URL`。
+> Vercel 的 `main` 部署名稱是 Production，但連接的是**測試用**的 Supabase 專案：註冊關閉、只開放受邀帳號、noindex，尚未正式對玩家開放。
+
+```bash
+cp .env.cloud.example .env.cloud          # 填 project ref、Vercel 網址、publishable key（不放任何密鑰）
+dev supabase login                        # token 存在 Docker volume，不在 repo 內
+dev pnpm cloud link
+dev pnpm cloud status                     # 唯讀
+dev pnpm cloud db                         # 唯讀 dry-run → 顯示計畫 ID
+dev pnpm cloud db --apply --ref <ref> --plan <計畫 ID>
+dev pnpm cloud secrets --ref <ref>        # CORS 允許清單 = Vercel 網址
+dev pnpm cloud functions --ref <ref>
+dev pnpm cloud smoke
+```
+
+- Vercel 只需要 `NEXT_PUBLIC_SUPABASE_URL`、`NEXT_PUBLIC_SUPABASE_ANON_KEY`（建議再加 `NEXT_PUBLIC_SIGNUP_ENABLED=false`、`NEXT_PUBLIC_APP_ENV=test`）。不要設定 service role key 或 `SUPABASE_INTERNAL_URL`。
+- 部署工具永遠不執行 `db reset`；migration 一定先 dry-run，套用時計畫必須相同。
+- `verify` / `report` 沒有連到資料庫時是 `NOT_RUN`（exit 2），**不是成功**；`db --apply` 的摘要會分開列出 migration 與驗證狀態。
+- 營運、備份、回滾、cron 檢查：[`docs/OPERATIONS_RUNBOOK.md`](docs/OPERATIONS_RUNBOOK.md)；部署後驗證：[`docs/CLOUD_SMOKE_TEST.md`](docs/CLOUD_SMOKE_TEST.md)。
 
 本地模擬 Vercel 的建置方式（不需要 Vercel 帳號）：
 
 ```bash
 dev bash -c "cd apps/web && pnpm install --frozen-lockfile && pnpm build"
 ```
-
-### Supabase Cloud（資料庫與 Edge Functions）
-
-在開發容器內執行（第一次需要 `supabase login`）：
-
-```bash
-dev supabase login
-dev supabase link --project-ref <project-ref>
-dev supabase db push                                   # 套用 supabase/migrations
-dev supabase functions deploy health --use-api         # 由 Supabase 伺服器端打包，可匯入 packages/
-dev supabase secrets set --env-file supabase/functions/.env   # 之後有自訂 secret 時
-```
-
-- `--use-api` 由 Supabase 伺服器端打包，不需要本地 Docker；只要匯入的檔案位於 git repo 內，`supabase/` 以外的檔案也會一起上傳。
-- Migration 與 Edge Functions 可分別部署，也不依賴 Vercel。
-- 以上指令是 Supabase CLI v2 的寫法；若升級到 v3，連到雲端的資料庫指令需要加 `--remote`，非互動環境需要 `--yes`。
 
 ---
 

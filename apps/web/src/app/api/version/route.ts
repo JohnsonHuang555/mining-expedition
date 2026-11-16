@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 /**
- * 部署版本（Staging 部署流程用來確認 Web 與 Edge Functions 是同一個 commit）。
+ * 部署版本（`pnpm cloud status` 用來比對 Vercel 部署的 commit 與本機 / Edge Functions 的版本）。
  * VERCEL_GIT_COMMIT_SHA / VERCEL_ENV / VERCEL_GIT_COMMIT_REF 是 Vercel 的系統環境變數（伺服器端），不是密鑰。
  */
 export function GET() {

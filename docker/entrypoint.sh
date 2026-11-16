@@ -24,6 +24,7 @@ if [ "$target_gid" -ne 0 ] && [ "$target_gid" -ne "$(id -g node)" ]; then
   groupmod -o -g "$target_gid" node
 fi
 chown node:node /pnpm-store /pnpm-home 2>/dev/null || true
+if [ -d /home/node/.supabase ]; then chown node:node /home/node/.supabase 2>/dev/null || true; fi
 
 # 2. Docker socket
 socket=/var/run/docker.sock

@@ -28,10 +28,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
       - run: pnpm test
-      - name: Staging deploy guard (project ref checks)
-        run: node --test scripts/staging/guard.test.ts
-      - name: Staging config audit (Vercel staging branch, version check, CORS fail closed)
-        run: node --test scripts/staging/config-audit.test.mjs scripts/vercel-ignore-build.test.mjs
+      - name: Cloud deploy script (project ref guard, dry-run plan, secrets, PASSED/FAILED/NOT_RUN exit codes) + config audit (CI never deploys)
+        run: node --test scripts/cloud/lib.test.ts scripts/cloud/cli.test.ts scripts/cloud/config-audit.test.ts
       - name: Engine coverage (T11：lines ≥ 90%)
         run: pnpm --filter @mining/game-engine coverage
       - name: Engine determinism (Node vs fixture)
@@ -66,7 +64,7 @@ jobs:
       - run: deno check --config supabase/functions/game-action/deno.json supabase/functions/game-action/index.ts
       - name: Edge request body limit (bounded streaming read)
         run: deno test --no-config supabase/functions/_shared/body_test.ts
-      - name: Edge CORS allowlist (exact origins + Vercel preview pattern)
+      - name: Edge CORS allowlist (exact origins, fail closed on Cloud)
         run: deno test --no-config supabase/functions/_shared/cors_test.ts
       - run: deno check --config packages/game-engine/deno.test.json packages/game-engine/src/index.ts packages/game-engine/test/golden-cli.ts packages/game-engine/bench/settle-bench.ts
       - name: Engine determinism (Deno vs fixture)

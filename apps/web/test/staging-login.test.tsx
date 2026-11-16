@@ -11,7 +11,7 @@ vi.mock("@/lib/auth/auth-provider", async (orig) => ({
 const { LoginForm, signupEnabled } = await import("@/components/auth/LoginForm");
 const { authMessage } = await import("@/lib/auth/auth-provider");
 
-describe("Staging 封閉測試的登入畫面", () => {
+describe("封閉測試的登入畫面", () => {
   it("NEXT_PUBLIC_SIGNUP_ENABLED=false：只顯示登入，說明封閉測試", () => {
     expect(signupEnabled("false")).toBe(false);
     expect(signupEnabled(undefined)).toBe(true);

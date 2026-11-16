@@ -1,16 +1,23 @@
-# 《挖礦探險隊》Operations Runbook（Staging）
+# 《挖礦探險隊》Operations Runbook（測試環境，單人維護）
 
-**Version 1.0（PR #16）** — 日常檢查、監控、備份還原、回滾與常見故障。
-所有 SQL 都是唯讀（`begin read only … rollback`），除非標示「會修改」。連線字串放在密碼管理器或 GitHub secret，不要貼到任何地方。
+**Version 2.0** — 日常檢查、監控、備份還原、回滾與常見故障。部署流程見 `docs/DEPLOYMENT.md`。
+所有 SQL 都是唯讀（`begin read only … rollback`），除非標示「會修改」。
+資料庫連線字串只放在密碼管理器，需要時在終端機臨時 `export CLOUD_DB_URL`，不要寫入檔案或貼到任何地方。
+下方的 `dev` 是 `docker compose run --rm dev` 的別名（README）。
 
 ---
 
 ## 1. 每日 / 每次部署後的檢查
 
 ```sh
-psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -q -f supabase/ops/verify-staging.sql   # 結構、權限、排程（不符合就失敗）
-psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql             # 排程結果、積壓、市場、連線
+dev pnpm cloud status                                         # 目標、migration、函式、網站版本、health
+docker compose run --rm -e CLOUD_DB_URL dev pnpm cloud verify # 結構、權限、排程（不符合就失敗）
+docker compose run --rm -e CLOUD_DB_URL dev pnpm cloud report # 排程結果、積壓、市場、連線
 ```
+
+每個指令最後一行是狀態：`VERIFY_STATUS=PASSED|FAILED|NOT_RUN`、`REPORT_STATUS=COMPLETED|FAILED|NOT_RUN`（exit 0 / 1 / 2）。**`NOT_RUN` 代表沒有連到資料庫、什麼都沒檢查**，不可記錄為通過。
+
+不想在本機使用連線字串：把 `supabase/ops/verify-cloud.sql`、`supabase/ops/ops-report.sql`（刪除 `\echo` 行）貼到 Supabase Dashboard → SQL Editor 執行，結果相同。
 
 | 指標 | 正常 | 異常時 |
 |---|---|---|
@@ -39,7 +46,8 @@ psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql        
 
 **低成本替代方案（尚未啟用，需要另外授權）**
 
-- GitHub Actions 排程（例如每小時）執行 `ops-report.sql`，失敗時 GitHub 會寄送通知。需要一個**唯讀**的資料庫角色（避免把有寫入權限的連線字串放進排程），建立角色需要另開 PR 與擁有者授權。
+- 每週（或每次部署後）手動執行 `dev pnpm cloud report`，看 cron 失敗與積壓。
+- 之後若要自動化：GitHub Actions 排程執行 `ops-report.sql` 需要一個**唯讀**的資料庫角色與 GitHub secret，與「CI 不使用雲端密鑰」的原則衝突，需要另外決定。
 - Smoke test 的 `SMOKE_LATENCY` 輸出（每次部署的少量樣本）作為延遲的粗略趨勢，不代表負載下的表現。
 
 ## 3. 錯誤碼與處理
@@ -62,7 +70,7 @@ psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql        
 - 檢查：`select jobname, schedule, active from cron.job where jobname = 'market-daily-prices';`（每天 UTC 16:01 = 台灣 00:01）。
 - 補產（會修改，但冪等；只產生缺少的日期，既有價格不變）：`select private.market_ensure(private.market_date(now()));`
 - 排程遺漏也不影響正確性：第一個讀取或交易請求會在同一個交易內產生當日價格。
-- 一般玩家無法觸發或重新抽價：`market_ensure` 只有 postgres 可以執行（`verify-staging.sql` 檢查權限）。
+- 一般玩家無法觸發或重新抽價：`market_ensure` 只有 postgres 可以執行（`verify-cloud.sql` 檢查權限）。
 
 ### 4.2 Action Log Compaction
 
@@ -88,11 +96,16 @@ psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql        
 ### 5.2 邏輯備份（所有方案適用）
 
 ```sh
-# 需要：Supabase CLI 已登入、已 link 到 Staging（guard 通過）。輸出檔含玩家資料與密鑰：只存放在加密的位置，不提交 Git
-supabase db dump --linked -f staging_roles.sql --role-only
-supabase db dump --linked -f staging_schema.sql
-supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema public,private,supabase_migrations
+dev pnpm cloud backup
+# 等同於（輸出到 backups/<ref>-<時間>/，已 gitignore，檔案權限 600）：
+#   supabase db dump --linked -f roles.sql --role-only
+#   supabase db dump --linked -f schema.sql
+#   supabase db dump --linked -f data.sql --use-copy --data-only --schema public,private,supabase_migrations
 ```
+
+這是**遊戲資料的邏輯備份，不是完整的環境還原點**：不含 `auth.users`，單獨還原時玩家無法登入、`players.id` 也對不到帳號。需要完整還原時，另外匯出 `auth` schema（含個資，評估處理方式），並在 §5.3 的演練中驗證帳號與玩家資料的對應。
+
+輸出檔含玩家資料與 `private` 密鑰表：只存放在加密的位置（加密磁碟、密碼管理器附件），不提交 Git、不上傳到公開位置。建議在每次套用 migration 之前執行一次。
 
 必須包含並在還原後檢查：
 
@@ -109,13 +122,15 @@ supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema pu
 
 ### 5.3 還原演練（只在可拋棄的隔離專案）
 
-1. 建立新的 Supabase 專案 `mining-expedition-restore-drill`（**不是** Staging；guard 的 `STAGING_PROJECT_REF` 不指向它）。
+1. 建立新的 Supabase 專案 `mining-expedition-restore-drill`（**不是**測試專案；不要把它設定成 `.env.cloud` 的 `CLOUD_PROJECT_REF`）。
 2. 依序還原：roles → schema → data（`psql "$DRILL_DB_URL" -v ON_ERROR_STOP=1 -f ...`）。
 3. 驗證：
-   - `verify-staging.sql` 通過（cron job 需要重新建立：還原 schema 不會自動建立 pg_cron job，需比對 `cron.job`）。
+   - `verify-cloud.sql` 通過（cron job 需要重新建立：還原 schema 不會自動建立 pg_cron job，需比對 `cron.job`）。
    - 玩家資產一致：抽樣比對 `players.coins`、`artifact_instances` 數量、`offline_reports` 狀態與備份前的查詢結果。
    - **冪等性**：從 `action_log` 取一筆已提交的交易，以同一個 player 的同一個 `idempotency_key` 呼叫 `game_load_snapshot(player, key, request_hash)` → 必須是 `replay` 或 `expired`，不可是 `ok`（即不會重新執行）。
    - 市場：`market_secret` 相同 → 下一個市場日的價格與原環境產生的一致。
+   - 帳號歸屬：若同時還原 `auth.users`，抽樣確認 `players.id` 都能對到 `auth.users.id`；沒有還原 auth 時，記錄「帳號未還原」，不可標示為完整還原。
+   - `private.player_secrets` 筆數與 `players` 相同；`private.market_secret` 恰好一筆。
 4. 演練結束後刪除專案。
 
 **狀態**：尚未執行（需要建立隔離專案與授權）→ 驗收為 **Blocked**。
@@ -124,21 +139,22 @@ supabase db dump --linked -f staging_data.sql --use-copy --data-only --schema pu
 
 | 層 | 方式 |
 |---|---|
-| Web（Vercel） | 在 main 上 revert 有問題的 PR → 重新執行 Staging deploy（`staging` 分支以 fast-forward 前進到 revert commit；Web 與 Edge 同一版本）。**不要**使用 Vercel 的「Promote to Production」（會變成 Production 部署），也不要 force push `staging`。緊急時可在 Vercel 對 `staging` 的上一個部署按 Redeploy，但 `/api/version` 會與 Edge 不一致，之後必須補上 revert + workflow |
-| Edge Functions | 以上一個 commit 重新執行 Staging deploy（只勾選 deploy functions），或本機 `git checkout <commit> && supabase functions deploy ... --project-ref <staging>`（先跑 guard） |
+| Web（Vercel） | 立即：Vercel → Deployments → 上一個正常的部署 → **Instant Rollback**（Hobby 方案可能只能回到前一個部署）。之後：在 main revert 有問題的 PR（merge 後 Vercel 自動部署修正版） |
+| Edge Functions | `git switch --detach <上一個正常的 commit>` → `dev pnpm cloud functions --ref <ref> --allow-unmerged`（仍會檢查目標與未提交變更）→ `git switch main`，再 revert 並正常部署 |
 | 資料庫 | 只能往前修正（新 migration）。PR #15 的壓縮執行後不可回滾到舊版函式（`docs/SECURITY_RELIABILITY.md` §3.5）；必要時先 `select cron.unschedule('action-log-compact');`（會修改） |
-| 資料錯誤 | 從備份還原到隔離專案 → 比對 → 決定修正方式；**不要在 Staging / Production 使用 `supabase db reset`** |
+| 資料錯誤 | 從備份還原到隔離專案 → 比對 → 決定修正方式；**不要在任何 Cloud 專案使用 `supabase db reset`**（部署腳本也會拒絕） |
+| 前後端版本不一致 | 用 `dev pnpm cloud status` 比對 Vercel 的 `/api/version` 與本機 HEAD；依 `docs/DEPLOYMENT.md` §3.3 的順序補部署 |
 
 ## 7. 常見故障
 
 | 症狀 | 檢查 | 處理 |
 |---|---|---|
 | Vercel build 找不到 `@mining/*` | Root Directory 是否為 `apps/web`、「Include files outside the root directory」是否開啟 | 開啟後重新部署 |
-| 瀏覽器 CORS 錯誤 | Edge secret `GAME_API_ALLOWED_ORIGIN` 是否等於 `staging` 的 Branch URL origin（Cloud 上沒有設定時會拒絕所有 origin；Edge log 有 `cors_not_configured`） | 更正 GitHub variable `STAGING_ALLOWED_ORIGINS` 後重新執行 workflow |
-| 登入後立刻被登出 | Auth Logs；Site URL / Redirect URLs | 補上 `staging` 的 Branch URL |
-| workflow 卡在「Wait for the Vercel staging build」 | Vercel → Deployments：`staging` 的建置是否失敗、是否被 Ignored Build Step 略過（log 顯示 `skip:`）、`STAGING_WEB_URL` 是否為 Branch URL | 修正後重新執行（只勾選 deploy web） |
-| main 出現 Vercel Production 部署 | `apps/web/vercel.json` 的 `ignoreCommand` 是否被後台覆寫、是否設定了 `MINING_ALLOW_PRODUCTION_BUILD` | 恢復設定；這個 PR 不部署 Production |
+| 瀏覽器 CORS 錯誤 | Edge secret `GAME_API_ALLOWED_ORIGIN` 是否等於 Vercel 網址的 origin（Cloud 上沒有設定時會拒絕所有 origin；Edge log 有 `cors_not_configured`） | 更正 `.env.cloud` 的 `CLOUD_WEB_URL` → `dev pnpm cloud secrets --ref <ref>` |
+| 登入後立刻被登出 | Auth Logs；Site URL / Redirect URLs | 設為 Vercel 網址（`docs/DEPLOYMENT.md` §2.2） |
+| merge 之後 Vercel 沒有部署 | Vercel → Deployments（是否 Canceled / Ignored）；Settings → Ignored Build Step 是否還停在「暫停」 | 恢復設定後對最新的 main 按 Redeploy |
+| 網站顯示「缺少環境變數」或 health 503 | Vercel 的 `NEXT_PUBLIC_SUPABASE_URL` / `ANON_KEY` 是否設定在 Production | 設定後 Redeploy（`NEXT_PUBLIC_*` 在建置時寫入） |
 | 註冊顯示「封閉測試」 | 預期行為（`NEXT_PUBLIC_SIGNUP_ENABLED=false` 與 Auth 關閉註冊） | 以 Dashboard 建立 / 邀請帳號 |
-| `verify-staging.sql` 失敗 | 錯誤訊息列出每一項 | 依項目修正（權限 / cron / 索引）；不要手動改 schema，改用 migration |
+| `verify-cloud.sql` 失敗 | 錯誤訊息列出每一項 | 依項目修正（權限 / cron / 索引）；不要手動改 schema，改用 migration |
 | cron job 不存在 | `pg_cron` 是否在 migration 之前啟用 | 啟用後重新套用排程（另開 migration 或依 migration 中的 `cron.schedule` 指令手動建立，並記錄） |
 | Free 專案被暫停 | Dashboard 顯示 Paused | Restore；長期測試建議 Pro |

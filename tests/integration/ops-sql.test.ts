@@ -1,11 +1,12 @@
 /**
- * supabase/ops/*.sql（Staging 驗證與營運報告）在真實的 Supabase Local 上可以執行：
+ * supabase/ops/*.sql（Cloud 驗證與營運報告）在真實的 Supabase Local 上可以執行：
  * 驗證 SQL 對正確的資料庫通過；權限被破壞時失敗；兩者都是唯讀（rollback），不改變任何資料。
  */
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { pool } from "./src/backend.ts";
+import { env, pool } from "./src/backend.ts";
 
 afterAll(async () => pool.end());
 
@@ -17,27 +18,27 @@ const sqlOf = (name: string) =>
     .join("\n");
 
 describe("supabase/ops", () => {
-  it("verify-staging.sql：正確的資料庫通過；回傳摘要；唯讀", async () => {
+  it("verify-cloud.sql：正確的資料庫通過；回傳摘要；唯讀", async () => {
     const c = await pool.connect();
     try {
       const notices: string[] = [];
       c.on("notice", (n) => notices.push(n.message ?? ""));
-      const res = await c.query(sqlOf("verify-staging.sql"));
+      const res = await c.query(sqlOf("verify-cloud.sql"));
       const results = Array.isArray(res) ? res : [res];
       const summary = results.find((r) => r.command === "SELECT")!.rows[0];
       expect(Number(summary.migrations_applied)).toBeGreaterThanOrEqual(6);
-      expect(notices).toContain("staging verification passed");
+      expect(notices).toContain("cloud verification passed");
     } finally {
       c.release();
     }
   });
 
-  it("verify-staging.sql：權限被破壞時失敗（在交易內暫時授權後 rollback）", async () => {
+  it("verify-cloud.sql：權限被破壞時失敗（在交易內暫時授權後 rollback）", async () => {
     const c = await pool.connect();
     try {
       await c.query("begin");
       await c.query("grant insert on public.market_prices to authenticated");
-      const body = sqlOf("verify-staging.sql").replace(/^begin read only;$/m, "").replace(/^rollback;$/m, "");
+      const body = sqlOf("verify-cloud.sql").replace(/^begin read only;$/m, "").replace(/^rollback;$/m, "");
       await expect(c.query(body)).rejects.toThrow(/client role can write public\.market_prices/);
     } finally {
       await c.query("rollback").catch(() => undefined);
@@ -51,5 +52,29 @@ describe("supabase/ops", () => {
     const selects = results.filter((r) => r.command === "SELECT");
     expect(selects.length).toBeGreaterThanOrEqual(8);
     expect(selects[0]!.rows.map((r: { jobname: string }) => r.jobname)).toEqual(expect.arrayContaining(["action-log-compact", "market-daily-prices"]));
+  });
+
+  /** CLI 層級：pnpm cloud verify / report 對真的資料庫 → exit 0、PASSED / COMPLETED（NOT_RUN / FAILED 見 scripts/cloud/cli.test.ts） */
+  const cloud = (cmd: string) => {
+    const r = spawnSync(process.execPath, [resolve(import.meta.dirname, "../../scripts/cloud/deploy.ts"), cmd], {
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "", CLOUD_DB_URL: env.dbUrl },
+      timeout: 60_000,
+    });
+    return { code: r.status, out: `${r.stdout}${r.stderr}`, last: r.stdout.trim().split("\n").at(-1) };
+  };
+
+  it("pnpm cloud verify（CLI）：正確的資料庫 → exit 0、VERIFY_STATUS=PASSED", () => {
+    const r = cloud("verify");
+    expect(r.code, r.out).toBe(0);
+    expect(r.last).toBe("VERIFY_STATUS=PASSED");
+    expect(r.out).not.toContain(env.dbUrl); // 不輸出連線字串
+  });
+
+  it("pnpm cloud report（CLI）：→ exit 0、REPORT_STATUS=COMPLETED，含 cron 段落", () => {
+    const r = cloud("report");
+    expect(r.code, r.out).toBe(0);
+    expect(r.last).toBe("REPORT_STATUS=COMPLETED");
+    expect(r.out).toContain("market-daily-prices");
   });
 });

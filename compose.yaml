@@ -34,6 +34,8 @@ services:
       - ${PROJECT_ROOT:-${PWD}}:${PROJECT_ROOT:-${PWD}}
       - pnpm-store:/pnpm-store
       - /var/run/docker.sock:/var/run/docker.sock
+      # Supabase CLI 的登入（supabase login 的 access token）保存在這個 Docker volume，不在 repo 內
+      - supabase-cli-auth:/home/node/.supabase
     environment:
       PROJECT_ROOT: ${PROJECT_ROOT:-${PWD}}
       WEB_URL: http://127.0.0.1:${WEB_PORT:-3000}
@@ -68,6 +70,7 @@ services:
 
 volumes:
   pnpm-store:
+  supabase-cli-auth:
 
 networks:
   supabase:

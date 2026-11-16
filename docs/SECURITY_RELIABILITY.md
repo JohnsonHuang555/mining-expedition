@@ -83,15 +83,15 @@ settle 可以整筆刪除的原因：settle 沒有 Client 指定的效果，只�
 - 監控：`select private.action_log_backlog();` 回傳待刪除的 settle 數、待壓縮的回應數與最老的待處理時間，正常應接近 0；排程結果見 `cron.job_run_details`。
 - 測試：6,000 筆過期 settle + 6,000 筆過期交易 → 有上限的一次執行只處理指定批數、下一次接續清完；交易全部保留冪等鍵（PGlite 與 Supabase Local）。
 
-### 3.5 部署與回滾 SOP（Staging / Cloud）
+### 3.5 部署與回滾 SOP（Cloud；實際操作見 `docs/DEPLOYMENT.md`、`docs/OPERATIONS_RUNBOOK.md`）
 
 > 以下是**營運程序**，不是已經演練過的保證；Cloud 上的備份還原演練尚未進行。
 
 **部署**
-1. 備份資料庫（含 `public.action_log`、`private.market_secret`、`private.player_secrets`）。
-2. 套用 migration（`supabase db push`）。
+1. 備份資料庫（`pnpm cloud backup`；含 `public.action_log`、`private.market_secret`、`private.player_secrets`）。
+2. 套用 migration（`pnpm cloud db` dry-run → 確認 → `pnpm cloud db --apply`；不 reset）。
 3. 確認 PostgREST 可以呼叫新的 RPC（service_role 呼叫 `game_load_snapshot` 的六參數版本與 `game_rate_limit`），並確認 `cron.job` 有 `action-log-compact`、`market-daily-prices`。
-4. 部署 Edge Functions（`character-create`、`game-state`、`game-action`）。
+4. 部署 Edge Functions（`pnpm cloud functions`：`health`、`character-create`、`game-state`、`game-action`）。
 5. 觀察 log：`request_failed`、`db_error`、`rate_limited` 的數量與 `durationMs`。
 
 **回滾**
@@ -100,7 +100,7 @@ settle 可以整筆刪除的原因：settle 沒有 Client 指定的效果，只�
 3. 第一次壓縮執行之後，資料庫不可回滾到不支援 `response = null` 的舊版函式（舊版會把已壓縮的紀錄當成 replay 並回傳 null）；這時只能修正往前（roll forward），或從壓縮前的備份還原。
 4. 還原備份時必須包含 `private.market_secret`：遺失會讓之後的每日價格序列與原本不同（已產生的價格仍保留）。
 
-**Staging 必須驗證的項目**
+**Cloud 測試環境必須驗證的項目**
 - Supabase Auth 的註冊 / 登入限流（`[auth.rate_limit]`）與 CAPTCHA：本專案尚未設定。
 - 未認證 / 惡意 JWT 的流量：只由 `auth.getUser` 拒絕，沒有 IP 層級限制，依賴平台額度與 gateway。
 - 真實 Edge Runtime 在負載下的 503 頻率（Supabase Local 偶發空回應 503）。

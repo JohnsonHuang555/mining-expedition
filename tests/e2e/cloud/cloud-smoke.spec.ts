@@ -1,13 +1,17 @@
 import { type Page, expect, test } from "@playwright/test";
 
 /**
- * Cloud Staging 瀏覽器 Smoke（只在設定 STAGING_WEB_URL 時執行）。
- * 不輸入或輸出任何密鑰以外的資料；測試帳號密碼來自環境變數，不寫入截圖、trace 或 log。
+ * Cloud 瀏覽器 Smoke（選用；只在設定 CLOUD_WEB_URL 時執行）：pnpm --filter @mining/e2e test:cloud
+ * 測試帳號密碼來自環境變數（SMOKE_USER_EMAIL / PASSWORD；SMOKE_USER_B_* 選填），不寫入截圖、trace 或 log。
  */
-const url = process.env.STAGING_WEB_URL;
-test.skip(!url, "STAGING_WEB_URL is not set");
+const url = process.env.CLOUD_WEB_URL;
+test.skip(!url, "CLOUD_WEB_URL is not set");
 
-const account = (p: "A" | "B") => ({ email: process.env[`SMOKE_USER_${p}_EMAIL`] ?? "", password: process.env[`SMOKE_USER_${p}_PASSWORD`] ?? "" });
+const account = (p: "A" | "B") => {
+  const prefix = p === "A" ? "SMOKE_USER_" : "SMOKE_USER_B_";
+  return { email: process.env[`${prefix}EMAIL`] ?? "", password: process.env[`${prefix}PASSWORD`] ?? "" };
+};
+const hasB = Boolean(account("B").email);
 
 async function signIn(page: Page, p: "A" | "B") {
   const a = account(p);
@@ -22,15 +26,16 @@ async function signIn(page: Page, p: "A" | "B") {
   await expect(status).toBeVisible();
 }
 
-test("部署版本：Staging 網址是 staging 分支的 Preview，且是預期的 commit", async ({ request }) => {
+test("部署版本：Vercel 的 main 部署；設定 EXPECTED_COMMIT 時核對 commit", async ({ request }) => {
   const r = await request.get("/api/version");
   expect(r.ok()).toBe(true);
   const v = (await r.json()) as { commit: string | null; ref: string | null; env: string };
-  expect(v).toMatchObject({ env: "preview", ref: "staging" });
+  expect(v).toMatchObject({ env: "production", ref: "main" });
   if (process.env.EXPECTED_COMMIT) expect(v.commit).toBe(process.env.EXPECTED_COMMIT);
 });
 
-test("登入 → 挖礦同步 → 重新整理保留 → 市場 / 背包 / 圖鑑 → 登出 → 換帳號不殘留", async ({ page }) => {
+test("登入 → 挖礦同步 → 重新整理保留 → 市場 / 背包 / 圖鑑 → 登出（→ 有第二個帳號時：換帳號不殘留）", async ({ page }) => {
+  test.skip(!account("A").email, "SMOKE_USER_EMAIL is not set");
   await page.goto("/login");
   // 封閉測試：不顯示公開註冊
   await expect(page.getByTestId("signup-closed")).toBeVisible();
@@ -55,6 +60,7 @@ test("登入 → 挖礦同步 → 重新整理保留 → 市場 / 背包 / 圖�
 
   await page.getByRole("button", { name: "登出" }).click();
   await expect(page).toHaveURL(/\/login/);
+  if (!hasB) return;
   await signIn(page, "B");
   await expect(page.getByRole("button", { name: "登出" })).toHaveAttribute("title", account("B").email);
 });

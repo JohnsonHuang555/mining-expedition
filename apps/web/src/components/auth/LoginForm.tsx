@@ -6,11 +6,13 @@ import { Panel, PixelButton } from "@/components/ui/pixel";
 import { useAuth } from "@/lib/auth/auth-provider";
 
 /**
- * 公開註冊是否顯示（建置時決定）。Staging 封閉測試設為 "false"：只顯示登入。
- * 這只是畫面；真正的限制是 Supabase Auth 的「關閉註冊」設定（docs/DEPLOYMENT_STAGING.md）。
+ * 公開註冊是否顯示（建置時決定）。封閉測試設為 "false"：只顯示登入。
+ * 這只是畫面；真正的限制是 Supabase Auth 的「關閉註冊」設定（docs/DEPLOYMENT.md）。
  */
 export const signupEnabled = (v: string | undefined = process.env.NEXT_PUBLIC_SIGNUP_ENABLED) => v !== "false";
 const APP_ENV = process.env.NEXT_PUBLIC_APP_ENV ?? "";
+/** 測試環境標記：NEXT_PUBLIC_APP_ENV=test（舊值 staging 也接受） */
+const IS_TEST_ENV = APP_ENV === "test" || APP_ENV === "staging";
 
 export function LoginForm({ allowSignup = signupEnabled() }: { allowSignup?: boolean } = {}) {
   const auth = useAuth();
@@ -43,9 +45,9 @@ export function LoginForm({ allowSignup = signupEnabled() }: { allowSignup?: boo
       <Panel className="w-full max-w-sm">
         <h1 className="text-center text-2xl font-black tracking-widest text-gold">⛏ 挖礦探險隊</h1>
         <p className="mt-1 text-center text-xs text-parchment-dim">挖掘、收集、離線也不停的礦坑冒險</p>
-        {APP_ENV === "staging" && (
+        {IS_TEST_ENV && (
           <p className="mt-3 bg-crystal/15 px-2 py-1 text-center text-xs text-crystal" data-testid="env-badge">
-            STAGING・封閉測試環境（資料可能被重置）
+            TEST・封閉測試環境（尚未正式開放）
           </p>
         )}
         {!allowSignup && (
