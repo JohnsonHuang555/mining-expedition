@@ -16,7 +16,9 @@
     "scripts/verify-hot-reload.ts",
     "scripts/diagnose.ts",
     "scripts/balance-sim.ts",
-    "scripts/staging/guard.ts",
-    "scripts/staging/guard.test.ts"
+    "scripts/cloud/lib.ts",
+    "scripts/cloud/lib.test.ts",
+    "scripts/cloud/deploy.ts",
+    "scripts/cloud/config-audit.test.ts"
   ]
 }

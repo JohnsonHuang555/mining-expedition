@@ -11,10 +11,15 @@ apps/web/next-env.d.ts
 .env
 .env.*
 !.env.example
+# .env.cloud：單人部署設定（project ref、Vercel 網址、publishable key…）。不提交；範本是 .env.cloud.example
+!.env.cloud.example
 apps/web/.env*
 !apps/web/.env.example
 supabase/functions/.env*
 !supabase/functions/.env.example
+
+# pnpm cloud backup 的輸出（含玩家資料與密鑰表）：絕對不提交
+backups/
 
 # Supabase CLI 本地暫存
 supabase/.temp/

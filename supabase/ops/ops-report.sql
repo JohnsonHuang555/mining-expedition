@@ -1,6 +1,6 @@
 -- =============================================================================
 -- 營運報告（唯讀）：排程結果、積壓、市場、限流、action_log 大小
--- 用法：psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/ops-report.sql
+-- 用法：pnpm cloud report（或貼到 Supabase Dashboard → SQL Editor 執行；SQL Editor 不支援 psql 的 \echo，請先刪除那幾行）
 -- =============================================================================
 
 begin read only;

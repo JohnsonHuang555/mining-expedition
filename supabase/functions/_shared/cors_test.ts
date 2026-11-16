@@ -46,7 +46,7 @@ Deno.test("Cloud（https 的 SUPABASE_URL）沒有設定允許清單：拒絕所
   assertEquals(requiresExplicitOrigins(undefined), false);
   const cloud = parseAllowedOrigins(undefined, true);
   assertEquals(cloud, []);
-  assertEquals(corsHeaders(cloud, "https://mining-expedition-git-staging-johnson.vercel.app")["Access-Control-Allow-Origin"], undefined);
+  assertEquals(corsHeaders(cloud, "https://mining-expedition.vercel.app")["Access-Control-Allow-Origin"], undefined);
   assertEquals(parseAllowedOrigins("", true), []);
   assertEquals(parseAllowedOrigins(undefined, false), "*"); // 本地維持相容
 });

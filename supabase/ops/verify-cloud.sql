@@ -1,6 +1,6 @@
 -- =============================================================================
--- Staging 資料庫驗證（唯讀；任何一項不符合就 raise exception → psql -v ON_ERROR_STOP=1 以非 0 結束）
--- 用法：psql "$STAGING_DB_URL" -v ON_ERROR_STOP=1 -f supabase/ops/verify-staging.sql
+-- Cloud 資料庫驗證（唯讀；任何一項不符合就 raise exception（執行失敗並列出問題））
+-- 用法：pnpm cloud verify（或貼到 Supabase Dashboard → SQL Editor 執行；沒有錯誤 = 通過）
 -- 不輸出任何密鑰內容（只檢查是否存在）。不寫入任何資料。
 -- =============================================================================
 
@@ -73,9 +73,9 @@ begin
   end if;
 
   if array_length(problems, 1) > 0 then
-    raise exception 'staging verification failed: %', array_to_string(problems, '; ');
+    raise exception 'cloud verification failed: %', array_to_string(problems, '; ');
   end if;
-  raise notice 'staging verification passed';
+  raise notice 'cloud verification passed';
 end $verify$;
 
 -- 摘要（非密鑰）
